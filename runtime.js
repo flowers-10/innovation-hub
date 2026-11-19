@@ -9010,24 +9010,19 @@ vGroundPosition = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;`),B.fragmentSh
         normal = groundBumpNormal( -vViewPosition, normal, groundSurfaceHeight );`)},e.needsUpdate=!0}var gV=new Set(["model","ground","instances"]);function km(e,A){e.position.set(A.position?.x??0,A.position?.y??0,A.position?.z??0),e.rotation.set(A.rotation?.x??0,A.rotation?.y??0,A.rotation?.z??0),e.scale.set(A.scale?.x??1,A.scale?.y??1,A.scale?.z??1),e.visible=A.show!==!1,e.name=A.name||A.type||"",e.updateMatrix()}function nV(e){for(let A=e;A;A=A.parent)if(!A.visible||A.userData.__designInternal)return!1;return!0}
 // Capture the loaded campus from each wing and the bridge, then feed the
 // filtered scene to the authored PBR materials.
-function* captureSceneReflections(scene, renderer, root, options, targets, materials) {
+function* captureSceneReflections(scene, renderer, root, options, targets, materials, trackLighting) {
   const reflectiveNames = new Set(options.materials);
-  const probes = options.probes.map(probe => ({ ...probe, meshes: [] }));
+  const probes = options.probes.map(probe => ({ ...probe, copies: new Map() }));
   const isReflective = material => material.isMeshStandardMaterial && reflectiveNames.has(material.name);
-
-  root.updateWorldMatrix(true, true);
-  root.traverseVisible(mesh => {
-    if (!mesh.isMesh) return;
+  const probeForMesh = mesh => {
     for (let object = mesh; object !== root; object = object.parent) {
       const probe = probes.find(({ meshPrefixes }) => meshPrefixes.some(prefix => object.name.startsWith(prefix)));
-      if (probe) {
-        probe.meshes.push(mesh);
-        break;
-      }
+      if (probe) return probe;
     }
-  });
+  };
 
-  const cube = new k0(256, { type: ls, colorSpace: zi });
+  root.updateWorldMatrix(true, true);
+  const cube = new k0(options.size ?? 256, { type: ls, colorSpace: zi });
   const camera = new vd(0.25, 6500, cube);
   const pmrem = new Il(renderer);
   try {
@@ -9039,14 +9034,18 @@ function* captureSceneReflections(scene, renderer, root, options, targets, mater
       const previousFace = renderer.getActiveCubeFace();
       const previousMipmap = renderer.getActiveMipmapLevel();
       const previousXR = renderer.xr.enabled;
-      for (const mesh of probe.meshes) mesh.visible = false;
+      const hiddenMeshes = [];
+      root.traverseVisible(mesh => {
+        if (mesh.isMesh && probeForMesh(mesh) === probe) hiddenMeshes.push(mesh);
+      });
+      for (const mesh of hiddenMeshes) mesh.visible = false;
       try {
         camera.update(renderer, scene);
         const target = pmrem.fromCubemap(cube.texture);
         targets.push(target);
         probe.texture = target.texture;
       } finally {
-        for (const mesh of probe.meshes) mesh.visible = true;
+        for (const mesh of hiddenMeshes) mesh.visible = true;
         renderer.setRenderTarget(previousTarget, previousFace, previousMipmap);
         renderer.xr.enabled = previousXR;
       }
@@ -9057,28 +9056,240 @@ function* captureSceneReflections(scene, renderer, root, options, targets, mater
     cube.dispose();
   }
 
-  // Apply the maps after all captures so each probe sees the same scene.
-  for (const { meshes, texture } of probes) {
-    const copies = new Map();
-    const applyReflection = material => {
-      if (!isReflective(material)) return material;
-      if (!copies.has(material)) {
-        const copy = material.clone();
-        copy.envMap = texture;
-        copy.envMapIntensity = options.intensity ?? 1;
-        copies.set(material, copy);
-        materials.add(copy);
-      }
-      return copies.get(material);
-    };
-    for (const mesh of meshes) {
+  // Both levels of detail share these probes, including meshes loaded after capture.
+  const applyTo = asset => {
+    asset.traverse(mesh => {
+      if (!mesh.isMesh) return;
+      const probe = probeForMesh(mesh);
+      if (!probe) return;
+      const applyReflection = material => {
+        if (!isReflective(material)) return material;
+        if (!probe.copies.has(material)) {
+          const copy = material.clone();
+          copy.envMap = probe.texture;
+          copy.envMapIntensity = options.intensity ?? 1;
+          probe.copies.set(material, copy);
+          materials.add(copy);
+          if (options.daylightResponsive) trackLighting(copy);
+        }
+        return probe.copies.get(material);
+      };
       mesh.material = Array.isArray(mesh.material) ? mesh.material.map(applyReflection) : applyReflection(mesh.material);
+    });
+  };
+  applyTo(root);
+  return applyTo;
+}
+
+function createDaylightController(scene, renderer, invalidate) {
+  const sun = scene.children.find(object => object.isDirectionalLight);
+  const hemisphere = scene.children.find(object => object.isHemisphereLight);
+  const morning = {
+    zenith: new bt("#749ece"),
+    horizon: new bt("#dde4e9"),
+    glow: new bt("#ffdfb6"),
+    sun: new bt("#fff1d9"),
+    ambient: new bt("#dce9ff"),
+    ground: new bt("#b9ab95"),
+    fog: new bt("#cad2da"),
+    offset: new sA(107, 116, -145),
+    direct: 2.45,
+    fill: 1.16,
+    reflection: 0.55,
+    exposure: 1.22,
+    shadow: 0.72,
+    skyOpacity: 1,
+    dusk: 0,
+    starlight: 0,
+  };
+  const evening = {
+    zenith: new bt("#4d648c"),
+    horizon: new bt("#e9a383"),
+    glow: new bt("#ffbc7b"),
+    sun: new bt("#ffac68"),
+    ambient: new bt("#9fb5e4"),
+    ground: new bt("#bb866a"),
+    fog: new bt("#ad929b"),
+    offset: new sA(-143, 31, 169),
+    direct: 2.12,
+    fill: 0.87,
+    reflection: 0.38,
+    exposure: 1.08,
+    shadow: 0.86,
+    skyOpacity: 1,
+    dusk: 1,
+    starlight: 0,
+  };
+  const night = {
+    zenith: new bt("#09142d"),
+    horizon: new bt("#253759"),
+    glow: new bt("#d5def3"),
+    sun: new bt("#9eb8f6"),
+    ambient: new bt("#9aafd7"),
+    ground: new bt("#717e99"),
+    fog: new bt("#243349"),
+    offset: new sA(75, 94, 142),
+    direct: 0.64,
+    fill: 0.48,
+    reflection: 0.29,
+    exposure: 0.98,
+    shadow: 0.42,
+    skyOpacity: 1,
+    dusk: 0,
+    starlight: 1,
+  };
+  const original = {
+    ...morning,
+    sun: sun?.color.clone() ?? morning.sun,
+    ambient: hemisphere?.color.clone() ?? morning.ambient,
+    ground: hemisphere?.groundColor.clone() ?? morning.ground,
+    fog: scene.fog?.color.clone() ?? morning.fog,
+    offset: sun ? sun.position.clone().sub(sun.target.position) : morning.offset,
+    direct: sun?.intensity ?? morning.direct,
+    fill: hemisphere?.intensity ?? morning.fill,
+    reflection: scene.environmentIntensity,
+    exposure: renderer.toneMappingExposure,
+    shadow: sun?.shadow?.intensity ?? morning.shadow,
+    skyOpacity: 0,
+  };
+  const periods = {original, morning, evening, night};
+  const uniforms = {
+    zenith: {value: original.zenith.clone()},
+    horizon: {value: original.horizon.clone()},
+    glow: {value: original.glow.clone()},
+    sunDirection: {value: new sA()},
+    skyOpacity: {value: 0},
+    dusk: {value: 0},
+    starlight: {value: 0},
+  };
+  const geometry = new vC(1, 32, 16);
+  const material = new Cg({
+    uniforms, side: fs, transparent: true, depthWrite: false, toneMapped: false,
+    vertexShader: `
+      varying vec3 skyRay;
+      void main() {
+        skyRay = position;
+        vec3 rayInView = mat3(viewMatrix) * position;
+        vec4 clip = projectionMatrix * vec4(rayInView, 1.0);
+        gl_Position = clip.xyww;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 zenith, horizon, glow, sunDirection;
+      uniform float skyOpacity, dusk, starlight;
+      varying vec3 skyRay;
+      float stars(vec3 ray) {
+        vec2 uv = vec2(atan(ray.z, ray.x) / 6.283185, asin(ray.y) / 3.141593);
+        vec2 field = uv * vec2(420.0, 220.0);
+        vec2 cell = floor(field);
+        float seed = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+        vec2 p = fract(field) - vec2(0.25 + seed * 0.5, 0.25 + fract(seed * 11.7) * 0.5);
+        return step(0.973, seed) * (1.0 - smoothstep(0.03, 0.19, length(p))) * smoothstep(0.04, 0.4, ray.y);
+      }
+      void main() {
+        vec3 ray = normalize(skyRay);
+        vec3 sky = mix(horizon, zenith, smoothstep(-0.045, 0.74, ray.y));
+        float facingSun = max(dot(ray, sunDirection), 0.0);
+        float haze = pow(facingSun, mix(9.0, 5.0, dusk)) * smoothstep(-0.05, 0.06, ray.y);
+        float disk = smoothstep(0.99978, 0.99993, facingSun);
+        haze *= mix(1.0, 0.21, starlight);
+        sky = mix(sky, glow, min(1.0, haze * mix(0.36, 0.59, dusk) + disk));
+        sky += stars(ray) * starlight * 0.38 * (1.0 - disk);
+        gl_FragColor = vec4(sky, skyOpacity);
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+  const sky = new Oe(geometry, material);
+  sky.name = "Daylight sky";
+  sky.renderOrder = -1000;
+  sky.frustumCulled = false;
+  sky.visible = false;
+  scene.add(sky);
+
+  const colorKeys = ["zenith", "horizon", "glow", "sun", "ambient", "ground", "fog"];
+  const numberKeys = ["skyOpacity", "dusk", "starlight", "direct", "fill", "reflection", "exposure", "shadow"];
+  const cloneProfile = profile => {
+    const copy = {...profile, offset: profile.offset.clone()};
+    for (const key of colorKeys) copy[key] = profile[key].clone();
+    return copy;
+  };
+  const current = cloneProfile(original);
+  let period = "original";
+  let transition = null;
+
+  function apply(from, to, blend, updateShadow) {
+    for (const key of colorKeys) current[key].copy(from[key]).lerp(to[key], blend);
+    for (const key of numberKeys) current[key] = from[key] + (to[key] - from[key]) * blend;
+    current.offset.copy(from.offset).lerp(to.offset, blend);
+    sky.visible = current.skyOpacity > 0;
+    for (const key of ["zenith", "horizon", "glow"]) uniforms[key].value.copy(current[key]);
+    for (const key of ["skyOpacity", "dusk", "starlight"]) uniforms[key].value = current[key];
+    uniforms.sunDirection.value.copy(current.offset).normalize();
+    scene.fog?.color.copy(current.fog);
+    scene.environmentIntensity = current.reflection;
+    renderer.toneMappingExposure = current.exposure;
+    if (hemisphere) {
+      hemisphere.color.copy(current.ambient);
+      hemisphere.groundColor.copy(current.ground);
+      hemisphere.intensity = current.fill;
     }
+    if (sun) {
+      sun.color.copy(current.sun);
+      sun.intensity = current.direct;
+      sun.position.copy(sun.target.position).add(current.offset);
+      sun.shadow.intensity = current.shadow;
+      if (sun.castShadow && updateShadow) renderer.shadowMap.needsUpdate = true;
+    }
+    invalidate();
   }
+
+  return {
+    set(nextPeriod, animate) {
+      if (!Object.hasOwn(periods, nextPeriod) || (animate && nextPeriod === period)) return;
+      period = nextPeriod;
+      const to = periods[period];
+      if (animate) {
+        transition = {from: cloneProfile(current), to, start: performance.now(), shadowStep: -1};
+      } else {
+        transition = null;
+        apply(to, to, 1, true);
+      }
+    },
+    update(now) {
+      if (!transition) return;
+      const {from, to, start, shadowStep} = transition;
+      const progress = Math.max(0, Math.min(1, (now - start) / 2000));
+      const eased = progress * progress * (3 - 2 * progress);
+      // Rebuild static shadows at intervals while colors interpolate on every frame.
+      const step = Math.floor(progress * 10);
+      apply(from, to, eased, step !== shadowStep);
+      transition.shadowStep = step;
+      if (progress === 1) transition = null;
+    },
+    dispose() {
+      sky.removeFromParent();
+      geometry.dispose();
+      material.dispose();
+    },
+  };
 }
 
 function EW({scene:e,camera:A,renderer:t,config:i,resolveAsset:s,onError:g,invalidate}){
 const reflectionTargets = [];
+const responsiveReflections = new Map();
+const reflectionLightReference = Math.max(0.01, i.environment?.intensity ?? 0.35);
+const updateReflectionLighting = () => {
+  if (!responsiveReflections.size) return;
+  const brightness = Math.pow(e.environmentIntensity / reflectionLightReference, 1.65);
+  for (const [material, intensity] of responsiveReflections) {
+    material.envMapIntensity = intensity * brightness;
+  }
+};
+const trackReflectionLighting = material => {
+  responsiveReflections.set(material, material.envMapIntensity);
+  material.envMapIntensity *= Math.pow(e.environmentIntensity / reflectionLightReference, 1.65);
+};
 let reflectionFrame = 0;
 let reflectionCapture;
 let n=!1,I=new Map,o=new Set,a=new Set,r=new Set,B=[],l=new Set,h=[],C=new _0().setMeshoptDecoder(lW),c=new Map,Q=new Map,E=e.environment,M=e.background,D=e.environmentIntensity,d=null,w=null,y=null,u=new sA,p=new sA,m=(lA,z="")=>{if(n)return;let $=new Error(`${z?`\u65E0\u6CD5\u52A0\u8F7D ${z}\uFF1A`:""}${lA instanceof Error?lA.message:String(lA)}`);g?g($):console.error($)},Y=()=>{o.forEach(lA=>lA.dispose()),o.clear(),a.forEach(lA=>lA.dispose()),a.clear(),r.forEach(lA=>lA.dispose()),r.clear()},F=lA=>{a.add(lA),Object.values(lA).forEach(z=>{z?.isTexture&&r.add(z)})},G=lA=>lA.traverse(z=>{z instanceof Oe&&(o.add(z.geometry),(Array.isArray(z.material)?z.material:[z.material]).forEach(F))}),R=lA=>{let z=c.get(lA);return z||(z=C.loadAsync(s(lA)).then($=>(G($.scene),n&&Y(),$.scene)),c.set(lA,z)),z},T=lA=>{let z=Q.get(lA);return z||(z=new qa().loadAsync(s(lA)).then($=>(n?$.dispose():r.add($),$)),Q.set(lA,z)),z},W=lA=>!n&&!lA.cancelled,j=(lA,z,$)=>{
@@ -9098,7 +9309,7 @@ lA.traverse(iA=>{if(!(iA instanceof Oe))return;iA.castShadow=z.castShadow!==!1,i
     return litMaterials.get(MA);
   }
   if (!z.glass && YA == null) return MA;
-  if(!z.glass){let EA=MA.clone();return EA.envMapIntensity=YA,F(EA),EA}let qA=new as;return Bn.prototype.copy.call(qA,MA),qA.metalness=z.glass.metalness??.9,qA.roughness=z.glass.roughness??.12,qA.envMapIntensity=z.glass.reflection??1,qA.clearcoat=1,qA.clearcoatRoughness=.08,$&&(qA.metalnessMap=$,qA.roughnessMap=$,qA.clearcoatMap=$),F(qA),qA};iA.material=Array.isArray(iA.material)?iA.material.map(WA):WA(iA.material)})},X=async(lA,z=!1)=>{let $=lA.item,iA=z?$.detailSrc:$.src,[YA,WA]=await Promise.all([R(iA),$.glass?.mask?T($.glass.mask):Promise.resolve(void 0)]);if(!W(lA))return;WA&&(WA.flipY=!1,WA.anisotropy=Math.min(8,t.capabilities.getMaxAnisotropy()));let MA=new ns,qA=YA.clone(!0);MA.add(qA);let EA=z?$.detailAssetMatrix??$.assetMatrix:$.assetMatrix;if(Array.isArray(EA)&&EA.length===16)MA.matrix.fromArray(EA),MA.matrixAutoUpdate=!1;else if($.fitSize!=null){MA.updateMatrixWorld(!0);let fA=new os().setFromObject(MA),GA=fA.getSize(new sA),VA=$.fitSize;if(typeof VA=="number")qA.scale.multiplyScalar(VA/(Math.max(GA.x,GA.y,GA.z)||1));else{let tt=VA.x??VA.width,Ct=VA.y??VA.height,FA=VA.z??VA.depth;tt!=null&&(qA.scale.x*=tt/(GA.x||1)),Ct!=null&&(qA.scale.y*=Ct/(GA.y||1)),FA!=null&&(qA.scale.z*=FA/(GA.z||1))}MA.updateMatrixWorld(!0),fA.setFromObject(MA);let OA=fA.getCenter(new sA);qA.position.sub(new sA(OA.x,fA.min.y,OA.z))}if(j(qA,$,WA),MA.name=z?"detail-asset":"base-asset",MA.visible=!z,lA.root.add(MA),z)lA.detail=MA;else{lA.coarse=MA,lA.root.updateWorldMatrix(!0,!0);let fA=new os().setFromObject(MA).getCenter(new sA);lA.center.copy(lA.root.worldToLocal(fA))}},_=async lA=>{let z=lA.item,[$,iA,YA]=await Promise.all([z.texture?T(z.texture):Promise.resolve(null),z.surfaceDetail?.src?T(z.surfaceDetail.src):Promise.resolve(null),z.surfaceDetail?.mask?T(z.surfaceDetail.mask):Promise.resolve(null)]);if(!W(lA))return;$&&($.colorSpace=Ve,$.wrapS=$.wrapT=Kg,$.repeat.set(-1,-1),$.offset.set(1,1),$.anisotropy=t.capabilities.getMaxAnisotropy(),$.minFilter=Li,$.magFilter=ce,$.needsUpdate=!0);let WA=new PI(z.width??420,z.depth??460);WA.rotateX(-Math.PI/2);let MA=new Bn({map:$,color:z.color??"#ffffff",roughness:1,metalness:0,alphaTest:z.alphaTest??.65,side:rs});$&&iA&&CW(MA,$,iA,z.surfaceDetail,t,YA);let qA=new Oe(WA,MA);qA.receiveShadow=!0,o.add(WA),F(MA),lA.root.add(qA)},AA=async lA=>{let z=await R(lA.item.src);if(!W(lA))return;z.updateMatrixWorld(!0);let $=lA.item.instanceMatrices??[],iA=new xt;const tint=lA.item.tint?new bt(lA.item.tint):null;z.traverse(YA=>{if(!(YA instanceof Oe))return;let WA=new za(YA.geometry,YA.material,$.length);$.forEach((MA,qA)=>{iA.fromArray(MA).multiply(YA.matrixWorld),WA.setMatrixAt(qA,iA);let EA=lA.item.instanceColors?.[qA];if(EA!=null||tint){const color=new bt(EA??0xffffff);if(tint)color.multiply(tint);WA.setColorAt(qA,color)}}),l.add(WA),WA.instanceMatrix.needsUpdate=!0,WA.instanceColor&&(WA.instanceColor.needsUpdate=!0),WA.computeBoundingBox(),WA.computeBoundingSphere(),WA.castShadow=lA.item.castShadow!==!1,WA.receiveShadow=lA.item.receiveShadow!==!1,j(WA,lA.item),lA.root.add(WA)})},oA=lA=>{let{position:z,rotation:$,scale:iA,name:YA,show:WA,parentId:MA,...qA}=lA;return JSON.stringify(qA)},gA=lA=>{if(n)return;let z=new Set;lA.filter($=>gV.has($.type)).forEach($=>{let iA=String($.id);z.add(iA);let YA=I.get(iA),WA=oA($);if(YA&&YA.signature!==WA&&(YA.cancelled=!0,YA.root.removeFromParent(),I.delete(iA),YA=void 0),!YA){let MA=new ns;MA.userData={id:$.id,seriesId:$.id,designRoot:!0},YA={root:MA,item:$,signature:WA,cancelled:!1,showingDetail:!1,center:new sA},I.set(iA,YA),e.add(MA);let qA=($.type==="model"?X(YA):$.type==="ground"?_(YA):AA(YA)).catch(EA=>m(EA,$.src??$.texture));h.push(qA)}YA.item=$,km(YA.root,$)}),I.forEach(($,iA)=>{z.has(iA)||($.cancelled=!0,$.root.removeFromParent(),I.delete(iA))})},hA=()=>{n||(A.getWorldPosition(u),I.forEach(lA=>{if(!lA.item.detailSrc||!lA.coarse||!nV(lA.root))return;lA.root.updateWorldMatrix(!0,!1),p.copy(lA.center).applyMatrix4(lA.root.matrixWorld);let z=u.distanceTo(p),$=lA.item.detailMode??i.detailMode??"auto",iA=$==="detail"||$==="auto"&&z<(lA.showingDetail?lA.item.lod?.exit??185:lA.item.lod?.enter??155);!lA.detail&&!lA.detailPromise&&!lA.detailFailed&&($==="detail"||$==="auto"&&z<(lA.item.lod?.prefetch??225))&&(lA.detailPromise=X(lA,!0).catch(YA=>{lA.detailFailed=!0,m(YA,lA.item.detailSrc)}).finally(()=>{lA.detailPromise=void 0,W(lA)&&(hA(),invalidate())})),lA.showingDetail=iA&&!!lA.detail,lA.coarse.visible=!lA.showingDetail,lA.detail&&(lA.detail.visible=lA.showingDetail)}))};if(t.toneMapping=IE,t.toneMappingExposure=i.renderer?.exposure??1.1,(i.series??[]).some(lA=>lA.type==="model"||lA.type==="instances")&&i.lighting==null&&i.environment==null&&i.light==null){let lA=new qB("#e8f5ff","#738167",1.15);B.push(lA),e.add(lA)}if(i.lighting?.hemisphere){let lA=i.lighting.hemisphere,z=new qB(lA.sky??"#e8f5ff",lA.ground??"#738167",lA.intensity??1.15);B.push(z),e.add(z)}
+  if(!z.glass){let EA=MA.clone();return EA.envMapIntensity=YA,F(EA),EA}let qA=new as;return Bn.prototype.copy.call(qA,MA),qA.metalness=z.glass.metalness??.9,qA.roughness=z.glass.roughness??.12,qA.envMapIntensity=z.glass.reflection??1,qA.clearcoat=1,qA.clearcoatRoughness=.08,$&&(qA.metalnessMap=$,qA.roughnessMap=$,qA.clearcoatMap=$),F(qA),qA};iA.material=Array.isArray(iA.material)?iA.material.map(WA):WA(iA.material)})},X=async(lA,z=!1)=>{let $=lA.item,iA=z?$.detailSrc:$.src,[YA,WA]=await Promise.all([R(iA),$.glass?.mask?T($.glass.mask):Promise.resolve(void 0)]);if(!W(lA))return;WA&&(WA.flipY=!1,WA.anisotropy=Math.min(8,t.capabilities.getMaxAnisotropy()));let MA=new ns,qA=YA.clone(!0);MA.add(qA);let EA=z?$.detailAssetMatrix??$.assetMatrix:$.assetMatrix;if(Array.isArray(EA)&&EA.length===16)MA.matrix.fromArray(EA),MA.matrixAutoUpdate=!1;else if($.fitSize!=null){MA.updateMatrixWorld(!0);let fA=new os().setFromObject(MA),GA=fA.getSize(new sA),VA=$.fitSize;if(typeof VA=="number")qA.scale.multiplyScalar(VA/(Math.max(GA.x,GA.y,GA.z)||1));else{let tt=VA.x??VA.width,Ct=VA.y??VA.height,FA=VA.z??VA.depth;tt!=null&&(qA.scale.x*=tt/(GA.x||1)),Ct!=null&&(qA.scale.y*=Ct/(GA.y||1)),FA!=null&&(qA.scale.z*=FA/(GA.z||1))}MA.updateMatrixWorld(!0),fA.setFromObject(MA);let OA=fA.getCenter(new sA);qA.position.sub(new sA(OA.x,fA.min.y,OA.z))}if(j(qA,$,WA),MA.name=z?"detail-asset":"base-asset",MA.visible=!z,lA.root.add(MA),lA.applySceneReflections?.(MA),z)lA.detail=MA;else{lA.coarse=MA,lA.root.updateWorldMatrix(!0,!0);let fA=new os().setFromObject(MA).getCenter(new sA);lA.center.copy(lA.root.worldToLocal(fA))}},_=async lA=>{let z=lA.item,[$,iA,YA]=await Promise.all([z.texture?T(z.texture):Promise.resolve(null),z.surfaceDetail?.src?T(z.surfaceDetail.src):Promise.resolve(null),z.surfaceDetail?.mask?T(z.surfaceDetail.mask):Promise.resolve(null)]);if(!W(lA))return;$&&($.colorSpace=Ve,$.wrapS=$.wrapT=Kg,$.repeat.set(-1,-1),$.offset.set(1,1),$.anisotropy=t.capabilities.getMaxAnisotropy(),$.minFilter=Li,$.magFilter=ce,$.needsUpdate=!0);let WA=new PI(z.width??420,z.depth??460);WA.rotateX(-Math.PI/2);let MA=new Bn({map:$,color:z.color??"#ffffff",roughness:1,metalness:0,alphaTest:z.alphaTest??.65,side:rs});$&&iA&&CW(MA,$,iA,z.surfaceDetail,t,YA);let qA=new Oe(WA,MA);qA.receiveShadow=!0,o.add(WA),F(MA),lA.root.add(qA)},AA=async lA=>{let z=await R(lA.item.src);if(!W(lA))return;z.updateMatrixWorld(!0);let $=lA.item.instanceMatrices??[],iA=new xt;const tint=lA.item.tint?new bt(lA.item.tint):null;z.traverse(YA=>{if(!(YA instanceof Oe))return;let WA=new za(YA.geometry,YA.material,$.length);$.forEach((MA,qA)=>{iA.fromArray(MA).multiply(YA.matrixWorld),WA.setMatrixAt(qA,iA);let EA=lA.item.instanceColors?.[qA];if(EA!=null||tint){const color=new bt(EA??0xffffff);if(tint)color.multiply(tint);WA.setColorAt(qA,color)}}),l.add(WA),WA.instanceMatrix.needsUpdate=!0,WA.instanceColor&&(WA.instanceColor.needsUpdate=!0),WA.computeBoundingBox(),WA.computeBoundingSphere(),WA.castShadow=lA.item.castShadow!==!1,WA.receiveShadow=lA.item.receiveShadow!==!1,j(WA,lA.item),lA.root.add(WA)})},oA=lA=>{let{position:z,rotation:$,scale:iA,name:YA,show:WA,parentId:MA,...qA}=lA;return JSON.stringify(qA)},gA=lA=>{if(n)return;let z=new Set;lA.filter($=>gV.has($.type)).forEach($=>{let iA=String($.id);z.add(iA);let YA=I.get(iA),WA=oA($);if(YA&&YA.signature!==WA&&(YA.cancelled=!0,YA.root.removeFromParent(),I.delete(iA),YA=void 0),!YA){let MA=new ns;MA.userData={id:$.id,seriesId:$.id,designRoot:!0},YA={root:MA,item:$,signature:WA,cancelled:!1,showingDetail:!1,center:new sA},I.set(iA,YA),e.add(MA);let qA=($.type==="model"?X(YA):$.type==="ground"?_(YA):AA(YA)).catch(EA=>m(EA,$.src??$.texture));h.push(qA)}YA.item=$,km(YA.root,$)}),I.forEach(($,iA)=>{z.has(iA)||($.cancelled=!0,$.root.removeFromParent(),I.delete(iA))})},hA=()=>{n||(A.getWorldPosition(u),I.forEach(lA=>{if(!lA.item.detailSrc||!lA.coarse||!nV(lA.root))return;lA.root.updateWorldMatrix(!0,!1),p.copy(lA.center).applyMatrix4(lA.root.matrixWorld);let z=u.distanceTo(p),$=lA.item.detailMode??i.detailMode??"auto",iA=$==="detail"||$==="auto"&&z<(lA.showingDetail?lA.item.lod?.exit??185:lA.item.lod?.enter??155);!lA.detail&&!lA.detailPromise&&!lA.detailFailed&&($==="detail"||$==="auto"&&z<(lA.item.lod?.prefetch??225))&&(lA.detailPromise=X(lA,!0).catch(YA=>{lA.detailFailed=!0,m(YA,lA.item.detailSrc)}).finally(()=>{lA.detailPromise=void 0,W(lA)&&(hA(),invalidate())})),lA.showingDetail=iA&&!!lA.detail,lA.coarse.visible=!lA.showingDetail,lA.detail&&(lA.detail.visible=lA.showingDetail)}))};if(t.toneMapping=IE,t.toneMappingExposure=i.renderer?.exposure??1.1,(i.series??[]).some(lA=>lA.type==="model"||lA.type==="instances")&&i.lighting==null&&i.environment==null&&i.light==null){let lA=new qB("#e8f5ff","#738167",1.15);B.push(lA),e.add(lA)}if(i.lighting?.hemisphere){let lA=i.lighting.hemisphere,z=new qB(lA.sky??"#e8f5ff",lA.ground??"#738167",lA.intensity??1.15);B.push(z),e.add(z)}
 if (i.lighting?.sun) {
   const sun = i.lighting.sun;
   const light = new Fo(sun.color ?? "#fff4dc", sun.intensity ?? 1.6);
@@ -9130,9 +9341,11 @@ e.environmentRotation.copy(e.backgroundRotation),YA!==$&&$.dispose()}else $.disp
   t.shadowMap.needsUpdate = true;
   invalidate();
   const capture = function* () {
-    for (const { root, item, coarse } of I.values()) {
+    for (const entry of I.values()) {
+      const { root, item, coarse } = entry;
       if (coarse && item.sceneReflection && nV(root)) {
-        yield* captureSceneReflections(e, t, root, item.sceneReflection, reflectionTargets, a);
+        entry.applySceneReflections = yield* captureSceneReflections(
+          e, t, root, item.sceneReflection, reflectionTargets, a, trackReflectionLighting);
       }
     }
   };
@@ -9156,10 +9369,21 @@ e.environmentRotation.copy(e.backgroundRotation),YA!==$&&$.dispose()}else $.disp
       reflectionFrame = requestAnimationFrame(captureNext);
     });
   }
-}),sync:gA,update:hA,dispose(){n||(n=!0,I.forEach(lA=>{lA.cancelled=!0,lA.root.removeFromParent()}),I.clear(),B.forEach(lA=>{lA.removeFromParent(),lA instanceof Fo&&lA.target.removeFromParent(),lA.dispose()}),e.environment===d&&d&&(e.environment=E),e.background===w&&w&&(e.background=M),e.environmentIntensity=D,y?.dispose(),cancelAnimationFrame(reflectionFrame),reflectionCapture?.return(),reflectionTargets.forEach(target=>target.dispose()),reflectionTargets.length=0,l.forEach(lA=>lA.dispose()),l.clear(),Y(),c.clear(),Q.clear())}}}function BN(e){if(!e?.effectsEnabled)return null;let A=e.activeEffect??"moebius",t=e.effectIntensity??1;if(!Number.isFinite(t)||t<0)throw new Error("\u540E\u671F\u6548\u679C\u5F3A\u5EA6\u5FC5\u987B\u4E3A\u6709\u9650\u7684\u975E\u8D1F\u6570\u3002");if(A==="bloom")return{type:A,options:{intensity:t}};if(A==="moebius")return{type:A,options:{thickness:1.5*t,amplitude:2*t}};throw new Error(`\u4E0D\u652F\u6301\u7684\u540E\u671F\u6548\u679C\uFF1A${A}\u3002\u5F53\u524D\u53EF\u5BFC\u51FA moebius\u3001bloom\u3002`)}var Ob=new Set(["rectangle","ellipse","triangle","polygon","star"]);function yAA(e,A,t){if(e==="rectangle")return new PI(A,t);if(e==="ellipse"){let g=new UC(.5,64);return g.scale(A,t,1),g}let i=new vB,s=e==="triangle"?3:e==="polygon"?5:10;for(let g=0;g<s;g++){let n=Math.PI/2+g*Math.PI*2/s,I=e==="star"&&g%2?.23:.5,o=Math.cos(n)*I*A,a=Math.sin(n)*I*t;g===0?i.moveTo(o,a):i.lineTo(o,a)}return i.closePath(),new LC(i)}function fAA({canvas:e,config:A,resolveAsset:t=g=>g,onError:i,editor:s,onNavigate}){let g=p=>{let m=p instanceof Error?p:new Error(String(p));return i?i(m):console.error(m),m},n;try{n=BN(s)}catch(p){throw g(p)}let I=new SC,o=A.renderer??{},a=new V0({canvas:e,antialias:o.antialias!==!1,alpha:o.alpha??!1});a.setClearColor(o.clearColor??"#ffffff",o.clearAlpha??1),a.setPixelRatio(Math.min(devicePixelRatio || 1, o.maxPixelRatio ?? 2));
+}),sync:gA,update:hA,updateReflectionLighting,dispose(){n||(n=!0,I.forEach(lA=>{lA.cancelled=!0,lA.root.removeFromParent()}),I.clear(),B.forEach(lA=>{lA.removeFromParent(),lA instanceof Fo&&lA.target.removeFromParent(),lA.dispose()}),e.environment===d&&d&&(e.environment=E),e.background===w&&w&&(e.background=M),e.environmentIntensity=D,y?.dispose(),cancelAnimationFrame(reflectionFrame),reflectionCapture?.return(),reflectionTargets.forEach(target=>target.dispose()),reflectionTargets.length=0,responsiveReflections.clear(),l.forEach(lA=>lA.dispose()),l.clear(),Y(),c.clear(),Q.clear())}}}function BN(e){if(!e?.effectsEnabled)return null;let A=e.activeEffect??"moebius",t=e.effectIntensity??1;if(!Number.isFinite(t)||t<0)throw new Error("\u540E\u671F\u6548\u679C\u5F3A\u5EA6\u5FC5\u987B\u4E3A\u6709\u9650\u7684\u975E\u8D1F\u6570\u3002");if(A==="bloom")return{type:A,options:{intensity:t}};if(A==="moebius")return{type:A,options:{thickness:1.5*t,amplitude:2*t}};throw new Error(`\u4E0D\u652F\u6301\u7684\u540E\u671F\u6548\u679C\uFF1A${A}\u3002\u5F53\u524D\u53EF\u5BFC\u51FA moebius\u3001bloom\u3002`)}var Ob=new Set(["rectangle","ellipse","triangle","polygon","star"]);function yAA(e,A,t){if(e==="rectangle")return new PI(A,t);if(e==="ellipse"){let g=new UC(.5,64);return g.scale(A,t,1),g}let i=new vB,s=e==="triangle"?3:e==="polygon"?5:10;for(let g=0;g<s;g++){let n=Math.PI/2+g*Math.PI*2/s,I=e==="star"&&g%2?.23:.5,o=Math.cos(n)*I*A,a=Math.sin(n)*I*t;g===0?i.moveTo(o,a):i.lineTo(o,a)}return i.closePath(),new LC(i)}function fAA({canvas:e,config:A,resolveAsset:t=g=>g,onError:i,editor:s,onNavigate}){let g=p=>{let m=p instanceof Error?p:new Error(String(p));return i?i(m):console.error(m),m},n;try{n=BN(s)}catch(p){throw g(p)}let I=new SC,o=A.renderer??{},a=new V0({canvas:e,antialias:o.antialias!==!1,alpha:o.alpha??!1});a.setClearColor(o.clearColor??"#ffffff",o.clearAlpha??1),a.setPixelRatio(Math.min(devicePixelRatio || 1, o.maxPixelRatio ?? 2));
 a.transmissionResolutionScale = o.transmissionResolutionScale ?? 1;
 a.outputColorSpace=Ve;let r=A.camera??{},B=r.type==="OrthographicCamera"?new hn(-10,10,10,-10,r.near??.1,r.far??2e3):new Bi(r.fov??45,1,r.near??.1,r.far??2e3);B.position.set(r.position?.x??0,r.position?.y??10,r.position?.z??20);let l=new v0(B,e);l.target.set(r.target?.x??0,r.target?.y??0,r.target?.z??0),l.enableDamping=r.controls?.enableDamping??!0,l.dampingFactor=r.controls?.dampingFactor??l.dampingFactor,l.enablePan=r.controls?.enablePan??!0;for(let p of["minDistance","maxDistance","minPolarAngle","maxPolarAngle","minAzimuthAngle","maxAzimuthAngle"])typeof r.controls?.[p]=="number"&&(l[p]=r.controls[p]);l.update(),A.fog?.show&&(I.fog=new YC(A.fog.color??"#ffffff",A.fog.near??1,A.fog.far??1500));let needsRender = true;
 const invalidate = () => { needsRender = true; };
+let daylight;
+const setTimeOfDay = (period, animate = true) => {
+  if (E || (!daylight && period === "original")) return;
+  if (!daylight) {
+    daylight = createDaylightController(I, a, () => {
+      h.updateReflectionLighting();
+      invalidate();
+    });
+  }
+  daylight.set(period, animate);
+};
 const previousView = new xt();
 let cameraMotion = null;
 const viewVector = ({x, y, z}) => new sA(x, y, z);
@@ -9239,6 +9463,7 @@ B.fov=r.portraitFov ? Math.min(102, Nn.radToDeg(2 * Math.atan(
 ))) : (r.fov ?? 45)):(B.left=-p/2,B.right=p/2,B.top=m/2,B.bottom=-m/2),B.updateProjectionMatrix(),D.width=p,D.height=m,D.pixelRatio=a.getPixelRatio(),M?.composer.setSize(p,m),M?.depthRenderTarget?.setSize(p,m),M?.normalRenderTarget?.setSize(p,m),invalidate()},w=new ResizeObserver(d);if(w.observe(e),d(),B instanceof hn){let p=B.position.distanceTo(l.target),m=2*Math.max(p,1)*Math.tan(Nn.degToRad(r.fov??75)/2);B.zoom=r.zoom??(B.top-B.bottom)/m,B.updateProjectionMatrix()}let y = (now = performance.now()) => {
   if (E) return;
   try {
+    daylight?.update(now);
     if (cameraMotion && cameraMotion.pausedAt === null) {
       const {path, focus, start, duration, onFinish} = cameraMotion;
       const progress = Math.max(0, Math.min((now - start) / duration, 1));
@@ -9268,5 +9493,5 @@ B.fov=r.portraitFov ? Math.min(102, Nn.radToDeg(2 * Math.atan(
     return;
   }
   Q = requestAnimationFrame(y);
-};return{ready:(n?Promise.resolve().then(()=>(rN(),aN)).then(({MoebiusPass:p,BloomPass:m})=>{if(E)return;let Y={scene:I,camera:{instance:B},renderer:{instance:a},sizes:D,_canvas:e,time:{}};try{M=n.type==="moebius"?new p(n.options,Y):new m(n.options,Y),M.composer.setSize(D.width,D.height)}catch(F){throw w.disconnect(),l.dispose(),h.dispose(),a.dispose(),F}}):Promise.resolve()).then(()=>(E||y(),h.ready)).catch(p=>{throw g(p)}),scene:I,camera:B,renderer:a,resize:d,setView,playCameraPath,pauseCameraPath,resumeCameraPath,stopCameraMotion,dispose(){E||(E=!0,stopCameraMotion(),cancelAnimationFrame(Q),w.disconnect(),l.dispose(),h.dispose(),c.forEach(p=>{p.geometry.dispose(),(Array.isArray(p.material)?p.material:[p.material]).forEach(m=>m.dispose())}),M?.composer.dispose(),M?.depthRenderTarget?.dispose(),M?.normalRenderTarget?.dispose(),M?.normalMat?.dispose(),a.dispose(),I.clear())}}}return cN(mAA);})();
+};return{ready:(n?Promise.resolve().then(()=>(rN(),aN)).then(({MoebiusPass:p,BloomPass:m})=>{if(E)return;let Y={scene:I,camera:{instance:B},renderer:{instance:a},sizes:D,_canvas:e,time:{}};try{M=n.type==="moebius"?new p(n.options,Y):new m(n.options,Y),M.composer.setSize(D.width,D.height)}catch(F){throw w.disconnect(),l.dispose(),h.dispose(),a.dispose(),F}}):Promise.resolve()).then(()=>(E||y(),h.ready)).catch(p=>{throw g(p)}),scene:I,camera:B,renderer:a,resize:d,setView,playCameraPath,pauseCameraPath,resumeCameraPath,stopCameraMotion,setTimeOfDay,dispose(){E||(E=!0,stopCameraMotion(),daylight?.dispose(),cancelAnimationFrame(Q),w.disconnect(),l.dispose(),h.dispose(),c.forEach(p=>{p.geometry.dispose(),(Array.isArray(p.material)?p.material:[p.material]).forEach(m=>m.dispose())}),M?.composer.dispose(),M?.depthRenderTarget?.dispose(),M?.normalRenderTarget?.dispose(),M?.normalMat?.dispose(),a.dispose(),I.clear())}}}return cN(mAA);})();
 globalThis.CreatorViewer = CreatorViewer;

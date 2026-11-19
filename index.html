@@ -55,12 +55,8 @@
       letter-spacing: .025em;
     }
 
-    .view-menu {
+    .view-menu, .daylight-controls {
       position: absolute;
-      left: 50%;
-      bottom: max(var(--inset), env(safe-area-inset-bottom));
-      transform: translateX(-50%);
-      max-width: calc(100% - 24px);
       display: flex;
       align-items: center;
       gap: 4px;
@@ -70,6 +66,19 @@
       background: rgb(30 43 39 / 94%);
       box-shadow: 0 10px 35px rgb(19 29 26 / 30%);
     }
+
+    .view-menu {
+      left: 50%;
+      bottom: max(var(--inset), env(safe-area-inset-bottom));
+      transform: translateX(-50%);
+      max-width: calc(100% - 24px);
+    }
+
+    .daylight-controls {
+      top: max(var(--inset), env(safe-area-inset-top));
+      right: max(var(--inset), env(safe-area-inset-right));
+    }
+    .daylight-controls button { min-width: 54px; }
 
     .view-presets, .tour-controls {
       display: flex;
@@ -82,7 +91,7 @@
     }
     .view-menu .tour-control { color: #f0c69d; }
 
-    .view-menu button {
+    :is(.view-menu, .daylight-controls) button {
       appearance: none;
       border: 1px solid transparent;
       border-radius: 6px;
@@ -98,12 +107,12 @@
       cursor: pointer;
       transition: background-color 160ms, color 160ms;
     }
-    .view-menu button:hover { background: #42524c; }
-    .view-menu button[aria-pressed="true"] {
+    :is(.view-menu, .daylight-controls) button:hover { background: #42524c; }
+    :is(.view-menu, .daylight-controls) button[aria-pressed="true"] {
       background: var(--paper);
       color: var(--ink);
     }
-    .view-menu button:focus-visible {
+    :is(.view-menu, .daylight-controls) button:focus-visible {
       outline: 2px solid #e5ae80;
       outline-offset: 1px;
     }
@@ -140,6 +149,12 @@
     }
     #loading-status { margin: 0; color: #d5dcd1; font-size: 13px; }
     #loading-status[role="alert"] { max-width: 45ch; line-height: 1.5; }
+    #local-preview {
+      justify-self: center;
+      margin-top: 16px;
+      color: #f0c69d;
+      font-size: 13px;
+    }
     .loading-bar {
       overflow: hidden;
       width: 108px;
@@ -165,7 +180,14 @@
       .masthead p { margin-bottom: 5px; font-size: 10px; }
       h1 { font-size: 29px; }
       .view-menu { flex-wrap: wrap; justify-content: center; width: max-content; }
-      .view-menu button { min-height: 44px; padding: 0 10px; }
+      .view-presets { flex-wrap: wrap; justify-content: center; min-width: 0; }
+      :is(.view-menu, .daylight-controls) button { min-height: 44px; padding: 0 10px; }
+      .daylight-controls {
+        top: calc(max(var(--inset), env(safe-area-inset-top)) + 83px);
+        right: auto;
+        left: max(var(--inset), env(safe-area-inset-left));
+      }
+      .daylight-controls button { min-width: 46px; }
       .tour-controls { border-left: 0; padding: 0; }
     }
     @media (max-width: 380px) {
@@ -174,7 +196,7 @@
     }
     @media (prefers-reduced-motion: reduce) {
       .loading-bar::after { animation: none; }
-      .view-menu button { transition: none; }
+      :is(.view-menu, .daylight-controls) button { transition: none; }
     }
   </style>
 </head>
@@ -184,6 +206,13 @@
     <p>研发园区 · 三维漫游</p>
     <h1>紫金科创</h1>
   </header>
+  <div class="daylight-controls" role="group" aria-label="场景时段" hidden>
+    <button type="button" data-time-of-day="original" aria-pressed="true">原始</button>
+    <button type="button" data-time-of-day="morning" aria-pressed="false">早晨</button>
+    <button type="button" data-time-of-day="evening" aria-pressed="false">傍晚</button>
+    <button type="button" data-time-of-day="night" aria-pressed="false">夜晚</button>
+    <button type="button" data-time-of-day="auto" aria-pressed="false">自动</button>
+  </div>
   <nav class="view-menu" aria-label="园区漫游控制" hidden>
     <div class="view-presets" role="group" aria-label="切换视角"></div>
     <div class="tour-controls" role="group" aria-label="飞行漫游" hidden>
@@ -195,9 +224,9 @@
   <div id="loading">
     <p class="loading-title" aria-hidden="true">紫金科创</p>
     <p id="loading-status" role="status">正在加载园区</p>
+    <a id="local-preview" href="http://127.0.0.1:8785/" hidden>打开本地园区预览</a>
     <span class="loading-bar" aria-hidden="true"></span>
   </div>
-  <script type="module" src="./runtime.js"></script>
   <script type="module">
     const canvas = document.getElementById('app');
     const loading = document.getElementById('loading');
@@ -208,7 +237,17 @@
     const tourButton = menu.querySelector('.tour-control');
     const stopButton = menu.querySelector('.tour-stop');
     const gesture = document.querySelector('.gesture');
+    const daylight = document.querySelector('.daylight-controls');
+    const daylightButtons = [...daylight.querySelectorAll('button')];
+    const automaticDaylight = daylight.querySelector('[data-time-of-day="auto"]');
     const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+    function getLocalTimePeriod(hour) {
+      if (hour < 6 || hour >= 19) return 'night';
+      if (hour < 10) return 'morning';
+      if (hour < 17) return 'original';
+      return 'evening';
+    }
 
     function showError(error) {
       if (!loading.isConnected) {
@@ -227,17 +266,30 @@
     }
 
     try {
-      const response = await fetch(new URL('./project.json', document.baseURI));
-      if (!response.ok) throw new Error('project.json HTTP ' + response.status);
+      if (location.protocol === 'file:') {
+        document.getElementById('local-preview').hidden = false;
+        throw new Error('浏览器无法直接从文件读取场景。请双击「启动园区.command」打开。');
+      }
+      const [response] = await Promise.all([
+        fetch(new URL('./project.json', document.baseURI), {cache: 'no-cache'}).catch(error => {
+          throw new Error('无法读取 project.json，请确认本地预览服务正在运行。', {cause: error});
+        }),
+        import('./runtime.js').catch(error => {
+          throw new Error('无法加载三维运行时 runtime.js。', {cause: error});
+        }),
+      ]);
+      if (!response.ok) throw new Error('无法读取 project.json（HTTP ' + response.status + '）。');
       const { editor } = await response.json();
       const config = editor.config;
       const views = config.views ?? [];
       const viewById = new Map(views.map(view => [view.id, view]));
+      const requestedView = viewById.get(new URLSearchParams(location.search).get('view'));
+      const initialView = requestedView ?? views[0];
       const buttons = new Map();
       const { intro, flyover } = config.cameraTours ?? {};
       const routeStops = route => route.stops.map(stop => typeof stop === 'string' ? viewById.get(stop) : stop);
       const arrival = viewById.get('arrival') ?? views[0];
-      const showIntro = intro && !reducedMotion.matches;
+      const showIntro = intro && !requestedView && !reducedMotion.matches;
       let activeTour = null;
       let paused = false;
       let reducedStep = -1;
@@ -267,7 +319,46 @@
           selectView(null);
         },
       });
-      if (showIntro) viewer.setView(routeStops(intro)[0], false);
+      if (requestedView) viewer.setView(requestedView, false);
+      else if (showIntro) viewer.setView(routeStops(intro)[0], false);
+
+      let daylightMode = 'original';
+      let timeOfDay = 'original';
+      let daylightTimer;
+
+      function refreshDaylight() {
+        const period = daylightMode === 'auto'
+          ? getLocalTimePeriod(new Date().getHours())
+          : daylightMode;
+        if (daylightMode === 'auto') {
+          const activePeriod = daylightButtons.find(button => button.dataset.timeOfDay === period);
+          const description = '自动 · 当前' + activePeriod.textContent;
+          automaticDaylight.title = description;
+          automaticDaylight.setAttribute('aria-label', description);
+        }
+        if (period === timeOfDay) return;
+        timeOfDay = period;
+        viewer.setTimeOfDay(period, !reducedMotion.matches);
+      }
+
+      for (const button of daylightButtons) {
+        button.addEventListener('click', () => {
+          daylightMode = button.dataset.timeOfDay;
+          clearInterval(daylightTimer);
+          if (daylightMode === 'auto') {
+            daylightTimer = setInterval(() => {
+              if (!document.hidden) refreshDaylight();
+            }, 15000);
+          } else {
+            automaticDaylight.removeAttribute('title');
+            automaticDaylight.removeAttribute('aria-label');
+          }
+          refreshDaylight();
+          for (const option of daylightButtons) {
+            option.setAttribute('aria-pressed', String(option === button));
+          }
+        });
+      }
 
       function jumpToView(view, animate = !reducedMotion.matches) {
         clearTour();
@@ -319,7 +410,10 @@
         if (event.key === 'Escape') endTour();
       });
       reducedMotion.addEventListener('change', () => {
-        if (reducedMotion.matches) endTour();
+        if (reducedMotion.matches) {
+          endTour();
+          if (!daylight.hidden) viewer.setTimeOfDay(timeOfDay, false);
+        }
         updateTourControls();
       });
 
@@ -332,16 +426,18 @@
         } else {
           if (resumeWhenVisible && activeTour && !paused) viewer.resumeCameraPath();
           resumeWhenVisible = false;
+          if (daylightMode === 'auto') refreshDaylight();
         }
       });
 
       await viewer.ready;
       if (loadingStatus.getAttribute('role') !== 'alert') {
-        for (const [index, view] of views.entries()) {
+        daylight.hidden = false;
+        for (const view of views) {
           const button = document.createElement('button');
           button.type = 'button';
           button.textContent = view.label;
-          button.setAttribute('aria-pressed', index === 0 ? 'true' : 'false');
+          button.setAttribute('aria-pressed', String(view === initialView));
           button.addEventListener('click', () => jumpToView(view));
           buttons.set(view.id, button);
           presets.append(button);
