@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>紫金科创 · 园区漫游</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      --ink: #212e2b;
+      --paper: #f5f1e8;
+      --muted: #586761;
+      --bronze: #a46f49;
+      --inset: clamp(16px, 3vw, 42px);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body { background: #243230; color: var(--ink); }
+    [hidden] { display: none !important; }
+
+    #app {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+      touch-action: none;
+    }
+    #app:active { cursor: grabbing; }
+
+    .masthead {
+      position: absolute;
+      inset: max(var(--inset), env(safe-area-inset-top)) auto auto max(var(--inset), env(safe-area-inset-left));
+      padding: 20px 26px 22px;
+      width: 236px;
+      background: rgb(247 244 235 / 94%);
+      border: 1px solid rgb(255 255 255 / 44%);
+      border-top: 2px solid var(--bronze);
+      box-shadow: 0 12px 36px rgb(27 36 35 / 12%);
+      pointer-events: none;
+    }
+
+    .masthead p {
+      margin: 0 0 7px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .18em;
+    }
+    h1 {
+      margin: 0;
+      font: 500 39px/1.16 "Songti SC", "STSong", "SimSun", serif;
+      letter-spacing: .025em;
+    }
+
+    .view-menu {
+      position: absolute;
+      left: 50%;
+      bottom: max(var(--inset), env(safe-area-inset-bottom));
+      transform: translateX(-50%);
+      max-width: calc(100% - 24px);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 5px;
+      border: 1px solid rgb(247 244 235 / 25%);
+      border-radius: 11px;
+      background: rgb(30 43 39 / 94%);
+      box-shadow: 0 10px 35px rgb(19 29 26 / 30%);
+    }
+
+    .view-presets, .tour-controls {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .tour-controls {
+      border-left: 1px solid rgb(247 244 235 / 27%);
+      padding-left: 5px;
+    }
+    .view-menu .tour-control { color: #f0c69d; }
+
+    .view-menu button {
+      appearance: none;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: #f5f2e9;
+      min-height: 42px;
+      padding: 0 19px;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.1;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: background-color 160ms, color 160ms;
+    }
+    .view-menu button:hover { background: #42524c; }
+    .view-menu button[aria-pressed="true"] {
+      background: var(--paper);
+      color: var(--ink);
+    }
+    .view-menu button:focus-visible {
+      outline: 2px solid #e5ae80;
+      outline-offset: 1px;
+    }
+
+    .gesture {
+      position: absolute;
+      right: max(var(--inset), env(safe-area-inset-right));
+      bottom: max(var(--inset), env(safe-area-inset-bottom));
+      margin: 0;
+      padding: 9px 12px;
+      border-radius: 4px;
+      background: rgb(30 43 39 / 87%);
+      color: var(--paper);
+      font-size: 11px;
+      letter-spacing: .075em;
+      pointer-events: none;
+    }
+
+    #loading {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      display: grid;
+      place-content: center;
+      padding: 24px;
+      background: radial-gradient(ellipse at 40% 22%, #394e49, #202e2c 65%);
+      color: var(--paper);
+      text-align: center;
+    }
+    .loading-title {
+      margin: 0 0 17px;
+      font: 500 clamp(28px, 7vw, 44px)/1.2 "Songti SC", "STSong", "SimSun", serif;
+      letter-spacing: .12em;
+    }
+    #loading-status { margin: 0; color: #d5dcd1; font-size: 13px; }
+    #loading-status[role="alert"] { max-width: 45ch; line-height: 1.5; }
+    .loading-bar {
+      overflow: hidden;
+      width: 108px;
+      height: 2px;
+      background: #5a6b61;
+      margin: 22px auto 0;
+    }
+    .loading-bar::after {
+      display: block;
+      width: 40%;
+      height: 100%;
+      content: "";
+      background: #e4b38d;
+      animation: loading 1.3s ease-in-out infinite alternate;
+    }
+    @keyframes loading { from { transform: translateX(0); } to { transform: translateX(150%); } }
+
+    @media (max-width: 850px), (pointer: coarse) {
+      .gesture { display: none; }
+    }
+    @media (max-width: 600px) {
+      .masthead { width: auto; padding: 12px 19px 15px; }
+      .masthead p { margin-bottom: 5px; font-size: 10px; }
+      h1 { font-size: 29px; }
+      .view-menu { flex-wrap: wrap; justify-content: center; width: max-content; }
+      .view-menu button { min-height: 44px; padding: 0 10px; }
+      .tour-controls { border-left: 0; padding: 0; }
+    }
+    @media (max-width: 380px) {
+      .view-presets { gap: 2px; }
+      .view-menu button { font-size: 12px; padding-inline: 8px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .loading-bar::after { animation: none; }
+      .view-menu button { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="app" aria-label="紫金科创园区三维视图"></canvas>
+  <header class="masthead">
+    <p>研发园区 · 三维漫游</p>
+    <h1>紫金科创</h1>
+  </header>
+  <nav class="view-menu" aria-label="园区漫游控制" hidden>
+    <div class="view-presets" role="group" aria-label="切换视角"></div>
+    <div class="tour-controls" role="group" aria-label="飞行漫游" hidden>
+      <button class="tour-control" type="button">开始漫游</button>
+      <button class="tour-stop" type="button" hidden>结束</button>
+    </div>
+  </nav>
+  <p class="gesture" aria-hidden="true" hidden>拖动旋转 · 滚轮缩放</p>
+  <div id="loading">
+    <p class="loading-title" aria-hidden="true">紫金科创</p>
+    <p id="loading-status" role="status">正在加载园区</p>
+    <span class="loading-bar" aria-hidden="true"></span>
+  </div>
+  <script type="module" src="./runtime.js"></script>
+  <script type="module">
+    const canvas = document.getElementById('app');
+    const loading = document.getElementById('loading');
+    const loadingStatus = document.getElementById('loading-status');
+    const menu = document.querySelector('.view-menu');
+    const presets = menu.querySelector('.view-presets');
+    const tourControls = menu.querySelector('.tour-controls');
+    const tourButton = menu.querySelector('.tour-control');
+    const stopButton = menu.querySelector('.tour-stop');
+    const gesture = document.querySelector('.gesture');
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+    function showError(error) {
+      if (!loading.isConnected) {
+        console.error(error);
+        return;
+      }
+      loadingStatus.textContent = '加载失败。' + (error instanceof Error ? error.message : String(error));
+      loadingStatus.setAttribute('role', 'alert');
+      loading.querySelector('.loading-bar').hidden = true;
+    }
+
+    function selectView(selected) {
+      for (const button of presets.querySelectorAll('button')) {
+        button.setAttribute('aria-pressed', button === selected ? 'true' : 'false');
+      }
+    }
+
+    try {
+      const response = await fetch(new URL('./project.json', document.baseURI));
+      if (!response.ok) throw new Error('project.json HTTP ' + response.status);
+      const { editor } = await response.json();
+      const config = editor.config;
+      const views = config.views ?? [];
+      const viewById = new Map(views.map(view => [view.id, view]));
+      const buttons = new Map();
+      const { intro, flyover } = config.cameraTours ?? {};
+      const routeStops = route => route.stops.map(stop => typeof stop === 'string' ? viewById.get(stop) : stop);
+      const arrival = viewById.get('arrival') ?? views[0];
+      const showIntro = intro && !reducedMotion.matches;
+      let activeTour = null;
+      let paused = false;
+      let reducedStep = -1;
+
+      function updateTourControls() {
+        tourControls.hidden = !flyover && !activeTour;
+        stopButton.hidden = activeTour !== flyover || !activeTour;
+        tourButton.textContent = activeTour === intro && intro ? '跳过开场'
+          : activeTour ? (paused ? '继续漫游' : '暂停漫游')
+          : reducedMotion.matches ? '下一视角' : '开始漫游';
+      }
+
+      function clearTour() {
+        activeTour = null;
+        paused = false;
+        updateTourControls();
+      }
+
+      const viewer = CreatorViewer.mount({
+        canvas,
+        config,
+        editor,
+        resolveAsset: path => new URL(path, document.baseURI).href,
+        onError: showError,
+        onNavigate: () => {
+          clearTour();
+          selectView(null);
+        },
+      });
+      if (showIntro) viewer.setView(routeStops(intro)[0], false);
+
+      function jumpToView(view, animate = !reducedMotion.matches) {
+        clearTour();
+        viewer.setView(view, animate);
+        selectView(buttons.get(view.id));
+      }
+
+      function startTour(route) {
+        activeTour = route;
+        paused = false;
+        selectView(null);
+        updateTourControls();
+        const stops = routeStops(route);
+        viewer.playCameraPath(stops, route.duration, () => {
+          clearTour();
+          selectView(buttons.get(stops.at(-1).id));
+        });
+      }
+
+      function endTour() {
+        if (!activeTour) return;
+        if (activeTour === intro) {
+          jumpToView(arrival, false);
+        } else {
+          viewer.stopCameraMotion();
+          clearTour();
+        }
+      }
+
+      tourButton.addEventListener('click', () => {
+        if (activeTour === intro && intro) {
+          endTour();
+        } else if (activeTour) {
+          if (paused) viewer.resumeCameraPath();
+          else viewer.pauseCameraPath();
+          paused = !paused;
+          updateTourControls();
+        } else if (reducedMotion.matches) {
+          const stops = routeStops(flyover).filter(view => view.id);
+          reducedStep = (reducedStep + 1) % stops.length;
+          jumpToView(stops[reducedStep], false);
+        } else {
+          canvas.animate([{opacity: .6}, {opacity: 1}], {duration: 370, easing: 'ease-out'});
+          startTour(flyover);
+        }
+      });
+      stopButton.addEventListener('click', endTour);
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') endTour();
+      });
+      reducedMotion.addEventListener('change', () => {
+        if (reducedMotion.matches) endTour();
+        updateTourControls();
+      });
+
+      // Suspend a flyover while its tab is hidden, without canceling a manual pause.
+      let resumeWhenVisible = false;
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          resumeWhenVisible = Boolean(activeTour && !paused);
+          if (resumeWhenVisible) viewer.pauseCameraPath();
+        } else {
+          if (resumeWhenVisible && activeTour && !paused) viewer.resumeCameraPath();
+          resumeWhenVisible = false;
+        }
+      });
+
+      await viewer.ready;
+      if (loadingStatus.getAttribute('role') !== 'alert') {
+        for (const [index, view] of views.entries()) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = view.label;
+          button.setAttribute('aria-pressed', index === 0 ? 'true' : 'false');
+          button.addEventListener('click', () => jumpToView(view));
+          buttons.set(view.id, button);
+          presets.append(button);
+        }
+        menu.hidden = !views.length && !flyover && !showIntro;
+        gesture.hidden = false;
+        if (showIntro && !reducedMotion.matches) {
+          activeTour = intro;
+          selectView(null);
+          updateTourControls();
+          loading.style.pointerEvents = 'none';
+          const reveal = loading.animate([{opacity: 1}, {opacity: 0}], {
+            duration: 320,
+            easing: 'ease-out',
+            fill: 'forwards',
+          });
+          await reveal.finished;
+          if (loadingStatus.getAttribute('role') === 'alert') {
+            reveal.cancel();
+            loading.style.pointerEvents = '';
+          } else {
+            loading.remove();
+            // Let the browser paint the unobstructed opening view before moving.
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            if (activeTour === intro) startTour(intro);
+          }
+        } else {
+          loading.remove();
+          if (showIntro) jumpToView(arrival, false);
+          updateTourControls();
+        }
+      }
+    } catch (error) {
+      showError(error);
+    }
+  </script>
+</body>
+</html>
