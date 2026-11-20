@@ -284,6 +284,7 @@
       const { editor } = await response.json();
       const config = editor.config;
       const views = config.views ?? [];
+      const presetViews = views.filter(view => view.showInMenu !== false);
       const viewById = new Map(views.map(view => [view.id, view]));
       const requestedView = viewById.get(new URLSearchParams(location.search).get('view'));
       const initialView = requestedView ?? views[0];
@@ -435,7 +436,7 @@
       await viewer.ready;
       if (loadingStatus.getAttribute('role') !== 'alert') {
         daylight.hidden = false;
-        for (const view of views) {
+        for (const view of presetViews) {
           const button = document.createElement('button');
           button.type = 'button';
           button.textContent = view.label;
@@ -444,7 +445,7 @@
           buttons.set(view.id, button);
           presets.append(button);
         }
-        menu.hidden = !views.length && !flyover && !showIntro;
+        menu.hidden = !presetViews.length && !flyover && !showIntro;
         gesture.hidden = false;
         if (showIntro && !reducedMotion.matches) {
           activeTour = intro;
