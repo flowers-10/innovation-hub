@@ -175,12 +175,14 @@
     @media (max-width: 1120px), (pointer: coarse) {
       .gesture { display: none; }
     }
+    @media (max-width: 920px) {
+      .view-menu { flex-wrap: wrap; justify-content: center; width: max-content; }
+      .view-presets { flex-wrap: wrap; justify-content: center; min-width: 0; }
+    }
     @media (max-width: 600px) {
       .masthead { width: auto; padding: 12px 19px 15px; }
       .masthead p { margin-bottom: 5px; font-size: 10px; }
       h1 { font-size: 29px; }
-      .view-menu { flex-wrap: wrap; justify-content: center; width: max-content; }
-      .view-presets { flex-wrap: wrap; justify-content: center; min-width: 0; }
       :is(.view-menu, .daylight-controls) button { min-height: 44px; padding: 0 10px; }
       .daylight-controls {
         top: calc(max(var(--inset), env(safe-area-inset-top)) + 83px);
