@@ -286,7 +286,9 @@
       const views = config.views ?? [];
       const presetViews = views.filter(view => view.showInMenu !== false);
       const viewById = new Map(views.map(view => [view.id, view]));
-      const requestedView = viewById.get(new URLSearchParams(location.search).get('view'));
+      const query = new URLSearchParams(location.search);
+      const requestedView = viewById.get(query.get('view'));
+      const requestedPeriod = query.get('time');
       const initialView = requestedView ?? views[0];
       const buttons = new Map();
       const { intro, flyover } = config.cameraTours ?? {};
@@ -329,7 +331,13 @@
       let timeOfDay = 'original';
       let daylightTimer;
 
-      function refreshDaylight() {
+      function markDaylightMode() {
+        for (const option of daylightButtons) {
+          option.setAttribute('aria-pressed', String(option.dataset.timeOfDay === daylightMode));
+        }
+      }
+
+      function refreshDaylight(animate = !reducedMotion.matches) {
         const period = daylightMode === 'auto'
           ? getLocalTimePeriod(new Date().getHours())
           : daylightMode;
@@ -341,7 +349,7 @@
         }
         if (period === timeOfDay) return;
         timeOfDay = period;
-        viewer.setTimeOfDay(period, !reducedMotion.matches);
+        viewer.setTimeOfDay(period, animate);
       }
 
       for (const button of daylightButtons) {
@@ -357,9 +365,7 @@
             automaticDaylight.removeAttribute('aria-label');
           }
           refreshDaylight();
-          for (const option of daylightButtons) {
-            option.setAttribute('aria-pressed', String(option === button));
-          }
+          markDaylightMode();
         });
       }
 
@@ -435,6 +441,11 @@
 
       await viewer.ready;
       if (loadingStatus.getAttribute('role') !== 'alert') {
+        if (['morning', 'evening', 'night'].includes(requestedPeriod)) {
+          daylightMode = requestedPeriod;
+          refreshDaylight(false);
+          markDaylightMode();
+        }
         daylight.hidden = false;
         for (const view of presetViews) {
           const button = document.createElement('button');

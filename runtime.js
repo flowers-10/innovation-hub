@@ -9081,7 +9081,48 @@ function* captureSceneReflections(scene, renderer, root, options, targets, mater
   return applyTo;
 }
 
-function createDaylightController(scene, renderer, invalidate) {
+function createEntranceLighting(scene, lighting, series) {
+  const fixture = lighting && series?.find(item => item.id === lighting.seriesId);
+  if (!fixture || !lighting.spots?.length) return;
+  const group = new ns();
+  km(group, fixture);
+  group.name = "Campus entrance lighting";
+  const lights = lighting.spots.map(spot => {
+    const light = new eE(spot.color, 0, spot.range, spot.angle, spot.softness);
+    light.position.fromArray(spot.position);
+    light.target.position.fromArray(spot.target);
+    group.add(light, light.target);
+    return light;
+  });
+  const diffusers = new Set();
+  const fixtures = scene.children.find(object => object.userData.seriesId === fixture.id);
+  fixtures?.traverse(object => {
+    if (!object.isMesh) return;
+    for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+      if (material.name === lighting.diffuserMaterial && material.emissive) diffusers.add(material);
+    }
+  });
+  scene.add(group);
+  group.visible = false;
+  return {
+    apply(level) {
+      group.visible = level > 0;
+      lights.forEach((light, index) => { light.intensity = lighting.spots[index].intensity * level; });
+      for (const material of diffusers) {
+        if (level > 0) material.emissive.set(lighting.diffuserColor);
+        else material.emissive.setHex(0);
+        material.emissiveIntensity = level;
+      }
+    },
+    dispose() {
+      group.removeFromParent();
+      for (const light of lights) light.dispose();
+      diffusers.clear();
+    },
+  };
+}
+
+function createDaylightController(scene, renderer, invalidate, entranceLighting) {
   const sun = scene.children.find(object => object.isDirectionalLight);
   const hemisphere = scene.children.find(object => object.isHemisphereLight);
   const morning = {
@@ -9101,6 +9142,7 @@ function createDaylightController(scene, renderer, invalidate) {
     skyOpacity: 1,
     dusk: 0,
     starlight: 0,
+    entrance: 0,
   };
   const evening = {
     zenith: new bt("#4d648c"),
@@ -9119,6 +9161,7 @@ function createDaylightController(scene, renderer, invalidate) {
     skyOpacity: 1,
     dusk: 1,
     starlight: 0,
+    entrance: 0.38,
   };
   const night = {
     zenith: new bt("#09142d"),
@@ -9137,6 +9180,7 @@ function createDaylightController(scene, renderer, invalidate) {
     skyOpacity: 1,
     dusk: 0,
     starlight: 1,
+    entrance: 1,
   };
   const original = {
     ...morning,
@@ -9208,7 +9252,7 @@ function createDaylightController(scene, renderer, invalidate) {
   scene.add(sky);
 
   const colorKeys = ["zenith", "horizon", "glow", "sun", "ambient", "ground", "fog"];
-  const numberKeys = ["skyOpacity", "dusk", "starlight", "direct", "fill", "reflection", "exposure", "shadow"];
+  const numberKeys = ["skyOpacity", "dusk", "starlight", "direct", "fill", "reflection", "exposure", "shadow", "entrance"];
   const cloneProfile = profile => {
     const copy = {...profile, offset: profile.offset.clone()};
     for (const key of colorKeys) copy[key] = profile[key].clone();
@@ -9229,6 +9273,7 @@ function createDaylightController(scene, renderer, invalidate) {
     scene.fog?.color.copy(current.fog);
     scene.environmentIntensity = current.reflection;
     renderer.toneMappingExposure = current.exposure;
+    entranceLighting?.apply(current.entrance);
     if (hemisphere) {
       hemisphere.color.copy(current.ambient);
       hemisphere.groundColor.copy(current.ground);
@@ -9271,6 +9316,7 @@ function createDaylightController(scene, renderer, invalidate) {
       sky.removeFromParent();
       geometry.dispose();
       material.dispose();
+      entranceLighting?.dispose();
     },
   };
 }
@@ -9380,7 +9426,7 @@ const setTimeOfDay = (period, animate = true) => {
     daylight = createDaylightController(I, a, () => {
       h.updateReflectionLighting();
       invalidate();
-    });
+    }, createEntranceLighting(I, A.lighting?.entrance, A.series));
   }
   daylight.set(period, animate);
 };
