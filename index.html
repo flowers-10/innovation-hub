@@ -89,7 +89,7 @@
       border-left: 1px solid rgb(247 244 235 / 27%);
       padding-left: 5px;
     }
-    .view-menu .tour-control { color: #f0c69d; }
+    .view-menu :is(.tour-control, .walk-control) { color: #f0c69d; }
 
     :is(.view-menu, .daylight-controls) button {
       appearance: none;
@@ -217,8 +217,9 @@
   </div>
   <nav class="view-menu" aria-label="园区漫游控制" hidden>
     <div class="view-presets" role="group" aria-label="切换视角"></div>
-    <div class="tour-controls" role="group" aria-label="飞行漫游" hidden>
+    <div class="tour-controls" role="group" aria-label="自动漫游" hidden>
       <button class="tour-control" type="button">开始漫游</button>
+      <button class="walk-control" type="button" hidden>安防巡检</button>
       <button class="tour-stop" type="button" hidden>结束</button>
     </div>
   </nav>
@@ -237,6 +238,7 @@
     const presets = menu.querySelector('.view-presets');
     const tourControls = menu.querySelector('.tour-controls');
     const tourButton = menu.querySelector('.tour-control');
+    const walkButton = menu.querySelector('.walk-control');
     const stopButton = menu.querySelector('.tour-stop');
     const gesture = document.querySelector('.gesture');
     const daylight = document.querySelector('.daylight-controls');
@@ -276,7 +278,7 @@
         fetch(new URL('./project.json', document.baseURI), {cache: 'no-cache'}).catch(error => {
           throw new Error('无法读取 project.json，请确认本地预览服务正在运行。', {cause: error});
         }),
-        import('./runtime.js').catch(error => {
+        import('./runtime.js?v=patrol-t8-1').catch(error => {
           throw new Error('无法加载三维运行时 runtime.js。', {cause: error});
         }),
       ]);
@@ -291,25 +293,32 @@
       const requestedPeriod = query.get('time');
       const initialView = requestedView ?? views[0];
       const buttons = new Map();
-      const { intro, flyover } = config.cameraTours ?? {};
+      const { intro, flyover, walk } = config.cameraTours ?? {};
       const routeStops = route => route.stops.map(stop => typeof stop === 'string' ? viewById.get(stop) : stop);
       const arrival = viewById.get('arrival') ?? views[0];
-      const showIntro = intro && !requestedView && !reducedMotion.matches;
+      const runPatrol = walk && query.get('tour') === 'patrol' && !requestedView;
+      const showIntro = intro && !requestedView && !runPatrol && !reducedMotion.matches;
       let activeTour = null;
       let paused = false;
-      let reducedStep = -1;
+      let currentView = initialView;
+      let resumeWhenVisible = false;
 
       function updateTourControls() {
-        tourControls.hidden = !flyover && !activeTour;
-        stopButton.hidden = activeTour !== flyover || !activeTour;
+        tourControls.hidden = !flyover && !walk && !activeTour;
+        tourButton.hidden = !flyover && activeTour !== intro;
+        walkButton.hidden = !walk;
+        stopButton.hidden = !activeTour || activeTour === intro;
         tourButton.textContent = activeTour === intro && intro ? '跳过开场'
-          : activeTour ? (paused ? '继续漫游' : '暂停漫游')
+          : activeTour && activeTour === flyover ? (paused ? '继续飞行' : '暂停飞行')
           : reducedMotion.matches ? '下一视角' : '开始漫游';
+        walkButton.textContent = activeTour && activeTour === walk ? (paused ? '继续巡检' : '暂停巡检')
+          : reducedMotion.matches ? '下一巡检视角' : '安防巡检';
       }
 
       function clearTour() {
         activeTour = null;
         paused = false;
+        resumeWhenVisible = false;
         updateTourControls();
       }
 
@@ -321,6 +330,7 @@
         onError: showError,
         onNavigate: () => {
           clearTour();
+          currentView = null;
           selectView(null);
         },
       });
@@ -370,21 +380,26 @@
       }
 
       function jumpToView(view, animate = !reducedMotion.matches) {
+        const leavingWalk = walk && (activeTour === walk || walk.stops.includes(currentView?.id));
         clearTour();
-        viewer.setView(view, animate);
+        currentView = view;
+        viewer.setView(view, animate && !leavingWalk);
         selectView(buttons.get(view.id));
       }
 
       function startTour(route) {
         activeTour = route;
         paused = false;
+        resumeWhenVisible = false;
+        currentView = null;
         selectView(null);
         updateTourControls();
         const stops = routeStops(route);
         viewer.playCameraPath(stops, route.duration, () => {
           clearTour();
-          selectView(buttons.get(stops.at(-1).id));
-        });
+          currentView = route.patrolPoints ? stops[0] : stops.at(-1);
+          selectView(buttons.get(currentView.id));
+        }, route.patrolPoints);
       }
 
       function endTour() {
@@ -397,23 +412,30 @@
         }
       }
 
-      tourButton.addEventListener('click', () => {
-        if (activeTour === intro && intro) {
-          endTour();
-        } else if (activeTour) {
+      function useTour(route) {
+        if (!route) return;
+        if (activeTour === route) {
           if (paused) viewer.resumeCameraPath();
           else viewer.pauseCameraPath();
           paused = !paused;
           updateTourControls();
         } else if (reducedMotion.matches) {
-          const stops = routeStops(flyover).filter(view => view.id);
-          reducedStep = (reducedStep + 1) % stops.length;
-          jumpToView(stops[reducedStep], false);
+          const stops = routeStops(route).filter(view => view.id);
+          if (stops.length) {
+            const next = (stops.indexOf(currentView) + 1) % stops.length;
+            jumpToView(stops[next], false);
+          }
         } else {
-          canvas.animate([{opacity: .6}, {opacity: 1}], {duration: 370, easing: 'ease-out'});
-          startTour(flyover);
+          if (route === flyover) canvas.animate([{opacity: .6}, {opacity: 1}], {duration: 370, easing: 'ease-out'});
+          startTour(route);
         }
+      }
+
+      tourButton.addEventListener('click', () => {
+        if (intro && activeTour === intro) endTour();
+        else useTour(flyover);
       });
+      walkButton.addEventListener('click', () => useTour(walk));
       stopButton.addEventListener('click', endTour);
       document.addEventListener('keydown', event => {
         if (event.key === 'Escape') endTour();
@@ -426,8 +448,6 @@
         updateTourControls();
       });
 
-      // Suspend a flyover while its tab is hidden, without canceling a manual pause.
-      let resumeWhenVisible = false;
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
           resumeWhenVisible = Boolean(activeTour && !paused);
@@ -441,6 +461,7 @@
 
       await viewer.ready;
       if (loadingStatus.getAttribute('role') !== 'alert') {
+        if (requestedView?.rover) viewer.setView(requestedView, false);
         if (['morning', 'evening', 'night'].includes(requestedPeriod)) {
           daylightMode = requestedPeriod;
           refreshDaylight(false);
@@ -456,7 +477,7 @@
           buttons.set(view.id, button);
           presets.append(button);
         }
-        menu.hidden = !presetViews.length && !flyover && !showIntro;
+        menu.hidden = !presetViews.length && !flyover && !walk && !showIntro;
         gesture.hidden = false;
         if (showIntro && !reducedMotion.matches) {
           activeTour = intro;
@@ -482,6 +503,7 @@
           loading.remove();
           if (showIntro) jumpToView(arrival, false);
           updateTourControls();
+          if (runPatrol) useTour(walk);
         }
       }
     } catch (error) {

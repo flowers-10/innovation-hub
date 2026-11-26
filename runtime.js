@@ -9434,6 +9434,39 @@ const previousView = new xt();
 let cameraMotion = null;
 const viewVector = ({x, y, z}) => new sA(x, y, z);
 const stopCameraMotion = () => { cameraMotion = null; };
+const patrolRoverId = A.cameraTours?.walk?.roverId;
+let patrolRover;
+let patrolWheels;
+const patrolPosition = new sA();
+const patrolHeading = new sA();
+const wheelNames = ["Wheel_FL", "Wheel_FR", "Wheel_RL", "Wheel_RR"];
+function posePatrolRover(position, heading, distance = 0) {
+  if (!patrolRover && patrolRoverId) {
+    patrolRover = I.children.find(obj => obj.userData.seriesId === patrolRoverId);
+  }
+  if (!patrolRover) return;
+  if (!patrolWheels) {
+    const wheels = wheelNames.map(name => patrolRover.getObjectByName(name)).filter(Boolean);
+    if (wheels.length === wheelNames.length) patrolWheels = wheels;
+  }
+  patrolRover.position.copy(position);
+  patrolRover.rotation.y = heading;
+  patrolWheels?.forEach(wheel => { wheel.rotation.x = (distance / 0.217) % (Math.PI * 2); });
+}
+
+function updatePatrol(path, progress) {
+  const length = path.getLength();
+  const robotArc = progress % 1;
+  const cameraArc = (robotArc + 1 - 2.9 / length) % 1;
+  path.getPointAt(robotArc, patrolPosition);
+  path.getTangentAt(robotArc, patrolHeading);
+  posePatrolRover(patrolPosition, Math.atan2(patrolHeading.x, patrolHeading.z), progress * length);
+  path.getPointAt(cameraArc, B.position);
+  B.position.y += 1.65;
+  l.target.copy(patrolPosition);
+  l.target.y += .77;
+}
+
 l.addEventListener("start", () => {
   stopCameraMotion();
   onNavigate?.();
@@ -9451,7 +9484,7 @@ function clearOrbitMomentum() {
   l.target.copy(target);
 }
 
-const playCameraPath = (views, duration, onFinish) => {
+const playCameraPath = (views, duration, onFinish, patrolPoints) => {
   const positions = views.map(view => viewVector(view.position));
   const targets = views.map(view => viewVector(view.target));
   clearOrbitMomentum();
@@ -9461,8 +9494,13 @@ const playCameraPath = (views, duration, onFinish) => {
   // Use the camera curve's distance parameter for both curves, so framing
   // stays tied to each programmed waypoint while the camera travels evenly.
   path.arcLengthDivisions = Math.max(200, views.length * 36);
+  const patrol = patrolPoints?.length > 2 ? new Rd(patrolPoints.map(viewVector), true) : null;
+  if (patrol) {
+    patrol.arcLengthDivisions = Math.max(320, patrolPoints.length * 28);
+    updatePatrol(patrol, 0);
+  }
   cameraMotion = {
-    path, focus: new Rd(targets), start: performance.now(), duration,
+    path, focus: new Rd(targets), patrol, start: performance.now(), duration,
     pausedAt: null, onFinish,
   };
   invalidate();
@@ -9484,6 +9522,7 @@ const resumeCameraPath = () => {
 
 const setView = (view, animate = true) => {
   stopCameraMotion();
+  if (view.rover) posePatrolRover(viewVector(view.rover.position), view.rover.heading);
   if (animate) {
     const end = viewVector(view.position);
     const distance = B.position.distanceTo(end);
@@ -9511,12 +9550,15 @@ B.fov=r.portraitFov ? Math.min(102, Nn.radToDeg(2 * Math.atan(
   try {
     daylight?.update(now);
     if (cameraMotion && cameraMotion.pausedAt === null) {
-      const {path, focus, start, duration, onFinish} = cameraMotion;
+      const {path, focus, patrol, start, duration, onFinish} = cameraMotion;
       const progress = Math.max(0, Math.min((now - start) / duration, 1));
       const eased = progress * progress * (3 - 2 * progress);
-      const parameter = path.getLength() > 0 ? path.getUtoTmapping(eased) : eased;
-      path.getPoint(parameter, B.position);
-      focus.getPoint(parameter, l.target);
+      if (patrol) updatePatrol(patrol, eased);
+      else {
+        const parameter = path.getLength() > 0 ? path.getUtoTmapping(eased) : eased;
+        path.getPoint(parameter, B.position);
+        focus.getPoint(parameter, l.target);
+      }
       if (progress === 1) {
         stopCameraMotion();
         onFinish?.();
