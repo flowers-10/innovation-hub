@@ -55,8 +55,7 @@
       letter-spacing: .025em;
     }
 
-    .view-menu, .daylight-controls {
-      position: absolute;
+    .view-menu, .daylight-controls, .weather-controls {
       display: flex;
       align-items: center;
       gap: 4px;
@@ -68,17 +67,22 @@
     }
 
     .view-menu {
+      position: absolute;
       left: 50%;
       bottom: max(var(--inset), env(safe-area-inset-bottom));
       transform: translateX(-50%);
       max-width: calc(100% - 24px);
     }
 
-    .daylight-controls {
+    .atmosphere-controls {
+      position: absolute;
       top: max(var(--inset), env(safe-area-inset-top));
       right: max(var(--inset), env(safe-area-inset-right));
+      display: grid;
+      justify-items: end;
+      gap: 8px;
     }
-    .daylight-controls button { min-width: 54px; }
+    :is(.daylight-controls, .weather-controls) button { min-width: 54px; }
 
     .view-presets, .tour-controls {
       display: flex;
@@ -91,7 +95,7 @@
     }
     .view-menu :is(.tour-control, .walk-control) { color: #f0c69d; }
 
-    :is(.view-menu, .daylight-controls) button {
+    :is(.view-menu, .daylight-controls, .weather-controls) button {
       appearance: none;
       border: 1px solid transparent;
       border-radius: 6px;
@@ -107,12 +111,12 @@
       cursor: pointer;
       transition: background-color 160ms, color 160ms;
     }
-    :is(.view-menu, .daylight-controls) button:hover { background: #42524c; }
-    :is(.view-menu, .daylight-controls) button[aria-pressed="true"] {
+    :is(.view-menu, .daylight-controls, .weather-controls) button:hover { background: #42524c; }
+    :is(.view-menu, .daylight-controls, .weather-controls) button[aria-pressed="true"] {
       background: var(--paper);
       color: var(--ink);
     }
-    :is(.view-menu, .daylight-controls) button:focus-visible {
+    :is(.view-menu, .daylight-controls, .weather-controls) button:focus-visible {
       outline: 2px solid #e5ae80;
       outline-offset: 1px;
     }
@@ -183,11 +187,12 @@
       .masthead { width: auto; padding: 12px 19px 15px; }
       .masthead p { margin-bottom: 5px; font-size: 10px; }
       h1 { font-size: 29px; }
-      :is(.view-menu, .daylight-controls) button { min-height: 44px; padding: 0 10px; }
-      .daylight-controls {
+      :is(.view-menu, .daylight-controls, .weather-controls) button { min-height: 44px; padding: 0 10px; }
+      .atmosphere-controls {
         top: calc(max(var(--inset), env(safe-area-inset-top)) + 83px);
         right: auto;
         left: max(var(--inset), env(safe-area-inset-left));
+        justify-items: start;
       }
       .daylight-controls button { min-width: 46px; }
       .tour-controls { border-left: 0; padding: 0; }
@@ -198,7 +203,7 @@
     }
     @media (prefers-reduced-motion: reduce) {
       .loading-bar::after { animation: none; }
-      :is(.view-menu, .daylight-controls) button { transition: none; }
+      :is(.view-menu, .daylight-controls, .weather-controls) button { transition: none; }
     }
   </style>
 </head>
@@ -208,12 +213,19 @@
     <p>研发园区 · 三维漫游</p>
     <h1>紫金科创</h1>
   </header>
-  <div class="daylight-controls" role="group" aria-label="场景时段" hidden>
-    <button type="button" data-time-of-day="original" aria-pressed="true">原始</button>
-    <button type="button" data-time-of-day="morning" aria-pressed="false">早晨</button>
-    <button type="button" data-time-of-day="evening" aria-pressed="false">傍晚</button>
-    <button type="button" data-time-of-day="night" aria-pressed="false">夜晚</button>
-    <button type="button" data-time-of-day="auto" aria-pressed="false">自动</button>
+  <div class="atmosphere-controls" hidden>
+    <div class="daylight-controls" role="group" aria-label="场景时段">
+      <button type="button" data-time-of-day="original" aria-pressed="true">原始</button>
+      <button type="button" data-time-of-day="morning" aria-pressed="false">早晨</button>
+      <button type="button" data-time-of-day="evening" aria-pressed="false">傍晚</button>
+      <button type="button" data-time-of-day="night" aria-pressed="false">夜晚</button>
+      <button type="button" data-time-of-day="auto" aria-pressed="false">自动</button>
+    </div>
+    <div class="weather-controls" role="group" aria-label="场景天气">
+      <button type="button" data-weather="clear" aria-pressed="true">晴天</button>
+      <button type="button" data-weather="overcast" aria-pressed="false">阴天</button>
+      <button type="button" data-weather="rain" aria-pressed="false">雨天</button>
+    </div>
   </div>
   <nav class="view-menu" aria-label="园区漫游控制" hidden>
     <div class="view-presets" role="group" aria-label="切换视角"></div>
@@ -241,9 +253,11 @@
     const walkButton = menu.querySelector('.walk-control');
     const stopButton = menu.querySelector('.tour-stop');
     const gesture = document.querySelector('.gesture');
+    const atmosphere = document.querySelector('.atmosphere-controls');
     const daylight = document.querySelector('.daylight-controls');
     const daylightButtons = [...daylight.querySelectorAll('button')];
     const automaticDaylight = daylight.querySelector('[data-time-of-day="auto"]');
+    const weatherButtons = [...document.querySelectorAll('[data-weather]')];
     const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
     function getLocalTimePeriod(hour) {
@@ -278,7 +292,7 @@
         fetch(new URL('./project.json', document.baseURI), {cache: 'no-cache'}).catch(error => {
           throw new Error('无法读取 project.json，请确认本地预览服务正在运行。', {cause: error});
         }),
-        import('./runtime.js?v=breeze-t9').catch(error => {
+        import('./runtime.js?v=weather-t9').catch(error => {
           throw new Error('无法加载三维运行时 runtime.js。', {cause: error});
         }),
       ]);
@@ -340,6 +354,19 @@
       let daylightMode = 'original';
       let timeOfDay = 'original';
       let daylightTimer;
+      let weatherMode = 'clear';
+
+      function applyWeather(mode, animate = !reducedMotion.matches) {
+        weatherMode = mode;
+        viewer.setWeather(mode, animate);
+        for (const button of weatherButtons) {
+          button.setAttribute('aria-pressed', String(button.dataset.weather === mode));
+        }
+      }
+
+      for (const button of weatherButtons) {
+        button.addEventListener('click', () => applyWeather(button.dataset.weather));
+      }
 
       function markDaylightMode() {
         for (const option of daylightButtons) {
@@ -443,7 +470,10 @@
       reducedMotion.addEventListener('change', () => {
         if (reducedMotion.matches) {
           endTour();
-          if (!daylight.hidden) viewer.setTimeOfDay(timeOfDay, false);
+          if (!atmosphere.hidden) {
+            viewer.setTimeOfDay(timeOfDay, false);
+            viewer.setWeather(weatherMode, false);
+          }
         }
         updateTourControls();
       });
@@ -467,7 +497,9 @@
           refreshDaylight(false);
           markDaylightMode();
         }
-        daylight.hidden = false;
+        const requestedWeather = query.get('weather');
+        if (['overcast', 'rain'].includes(requestedWeather)) applyWeather(requestedWeather, false);
+        atmosphere.hidden = false;
         for (const view of presetViews) {
           const button = document.createElement('button');
           button.type = 'button';

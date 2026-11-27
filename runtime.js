@@ -9186,7 +9186,73 @@ function createEntranceLighting(scene, lighting, series) {
   };
 }
 
-function createDaylightController(scene, renderer, invalidate, entranceLighting) {
+function createWeatherRain(scene, camera) {
+  const dropCount = 760;
+  const seeds = new Float32Array(dropCount * 6);
+  const ends = new Float32Array(dropCount * 2);
+  for (let drop = 0; drop < dropCount; drop++) {
+    const seed = [Math.random(), Math.random(), Math.random()];
+    seeds.set(seed, drop * 6);
+    seeds.set(seed, drop * 6 + 3);
+    ends[drop * 2 + 1] = 1;
+  }
+  const geometry = new bi();
+  geometry.setAttribute("position", new mi(seeds, 3));
+  geometry.setAttribute("rainEnd", new mi(ends, 1));
+  const uniforms = {rainTime: {value: 0}, rainLevel: {value: 0}};
+  const material = new Cg({
+    uniforms, transparent: true, depthWrite: false,
+    vertexShader: `
+      attribute float rainEnd;
+      uniform float rainTime, rainLevel;
+      varying float rainAlpha;
+      void main() {
+        float fall = fract(position.y - rainTime * (0.59 + 0.31 * position.z));
+        vec3 center = vec3((position.x - 0.5) * 36.0, fall * 18.0 - 6.0, (position.z - 0.5) * 36.0);
+        float distanceToEye = length(center);
+        rainAlpha = rainLevel * mix(0.06, 0.46, rainEnd)
+          * smoothstep(1.3, 3.8, distanceToEye) * (1.0 - smoothstep(12.0, 23.0, distanceToEye))
+          * smoothstep(0.0, 0.055, fall) * (1.0 - smoothstep(0.95, 1.0, fall));
+        center += (rainEnd - 0.5) * vec3(0.045, -0.39 - position.x * 0.17, 0.015);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(center, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying float rainAlpha;
+      void main() {
+        gl_FragColor = vec4(0.60, 0.72, 0.83, rainAlpha);
+        #include <colorspace_fragment>
+      }
+    `,
+  });
+  const rain = new TC(geometry, material);
+  rain.name = "Weather rain";
+  rain.visible = false;
+  rain.frustumCulled = false;
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  scene.add(rain);
+  return {
+    setLevel(level) {
+      uniforms.rainLevel.value = level;
+    },
+    update(now) {
+      const wasVisible = rain.visible;
+      rain.visible = uniforms.rainLevel.value > .006 && !reducedMotion.matches && !document.hidden;
+      if (rain.visible) {
+        rain.position.copy(camera.position);
+        uniforms.rainTime.value = now / 1000;
+      }
+      return rain.visible || wasVisible;
+    },
+    dispose() {
+      rain.removeFromParent();
+      geometry.dispose();
+      material.dispose();
+    },
+  };
+}
+
+function createDaylightController(scene, camera, renderer, invalidate, entranceLighting) {
   const sun = scene.children.find(object => object.isDirectionalLight);
   const hemisphere = scene.children.find(object => object.isHemisphereLight);
   const morning = {
@@ -9204,11 +9270,16 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
     exposure: 1.22,
     shadow: 0.72,
     skyOpacity: 1,
+    cloudCover: 0,
+    rain: 0,
+    fogNear: scene.fog?.near ?? 168,
+    fogFar: scene.fog?.far ?? 830,
     dusk: 0,
     starlight: 0,
     entrance: 0,
   };
   const evening = {
+    ...morning,
     zenith: new bt("#4d648c"),
     horizon: new bt("#e9a383"),
     glow: new bt("#ffbc7b"),
@@ -9228,6 +9299,7 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
     entrance: 0.38,
   };
   const night = {
+    ...morning,
     zenith: new bt("#09142d"),
     horizon: new bt("#253759"),
     glow: new bt("#d5def3"),
@@ -9261,6 +9333,12 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
     skyOpacity: 0,
   };
   const periods = {original, morning, evening, night};
+  const weatherPresets = {
+    overcast: {cloud: .74, rain: 0, direct: .48, fill: .97, reflection: .81, shadow: .47, fog: .79,
+      sky: "#8793a0", horizon: "#c0c8ce", nightSky: "#1a2233", nightHorizon: "#364357"},
+    rain: {cloud: 1, rain: .96, direct: .25, fill: .84, reflection: .64, shadow: .23, fog: .56,
+      sky: "#556578", horizon: "#9eaebc", nightSky: "#111b2b", nightHorizon: "#2d4056"},
+  };
   const uniforms = {
     zenith: {value: original.zenith.clone()},
     horizon: {value: original.horizon.clone()},
@@ -9269,6 +9347,7 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
     skyOpacity: {value: 0},
     dusk: {value: 0},
     starlight: {value: 0},
+    cloudCover: {value: 0},
   };
   const geometry = new vC(1, 32, 16);
   const material = new Cg({
@@ -9284,7 +9363,7 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
     `,
     fragmentShader: `
       uniform vec3 zenith, horizon, glow, sunDirection;
-      uniform float skyOpacity, dusk, starlight;
+      uniform float skyOpacity, dusk, starlight, cloudCover;
       varying vec3 skyRay;
       float stars(vec3 ray) {
         vec2 uv = vec2(atan(ray.z, ray.x) / 6.283185, asin(ray.y) / 3.141593);
@@ -9294,6 +9373,15 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
         vec2 p = fract(field) - vec2(0.25 + seed * 0.5, 0.25 + fract(seed * 11.7) * 0.5);
         return step(0.973, seed) * (1.0 - smoothstep(0.03, 0.19, length(p))) * smoothstep(0.04, 0.4, ray.y);
       }
+      float cloudHash(vec2 cell) {
+        return fract(sin(dot(cell, vec2(128.7, 311.9))) * 43758.5453);
+      }
+      float cloudNoise(vec2 point) {
+        vec2 cell = floor(point);
+        vec2 blend = smoothstep(0.0, 1.0, fract(point));
+        return mix(mix(cloudHash(cell), cloudHash(cell + vec2(1.0, 0.0)), blend.x),
+          mix(cloudHash(cell + vec2(0.0, 1.0)), cloudHash(cell + vec2(1.0)), blend.x), blend.y);
+      }
       void main() {
         vec3 ray = normalize(skyRay);
         vec3 sky = mix(horizon, zenith, smoothstep(-0.045, 0.74, ray.y));
@@ -9301,8 +9389,15 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
         float haze = pow(facingSun, mix(9.0, 5.0, dusk)) * smoothstep(-0.05, 0.06, ray.y);
         float disk = smoothstep(0.99978, 0.99993, facingSun);
         haze *= mix(1.0, 0.21, starlight);
-        sky = mix(sky, glow, min(1.0, haze * mix(0.36, 0.59, dusk) + disk));
+        sky = mix(sky, glow, min(1.0, haze * mix(0.36, 0.59, dusk) + disk) * (1.0 - cloudCover));
         sky += stars(ray) * starlight * 0.38 * (1.0 - disk);
+        if (cloudCover > 0.0 && ray.y > -0.04) {
+          vec2 plane = ray.xz * (2.1 / max(0.29, ray.y + 0.26));
+          float density = cloudNoise(plane) * 0.59 + cloudNoise(plane * 2.2 + 7.4) * 0.28
+            + cloudNoise(plane * 5.3 - 3.2) * 0.13;
+          float bands = smoothstep(0.28, 0.78, density);
+          sky *= mix(1.0, mix(1.19, 0.73, bands), cloudCover * smoothstep(-0.04, 0.19, ray.y));
+        }
         gl_FragColor = vec4(sky, skyOpacity);
         #include <colorspace_fragment>
       }
@@ -9316,7 +9411,8 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
   scene.add(sky);
 
   const colorKeys = ["zenith", "horizon", "glow", "sun", "ambient", "ground", "fog"];
-  const numberKeys = ["skyOpacity", "dusk", "starlight", "direct", "fill", "reflection", "exposure", "shadow", "entrance"];
+  const numberKeys = ["skyOpacity", "dusk", "starlight", "cloudCover", "rain", "fogNear", "fogFar",
+    "direct", "fill", "reflection", "exposure", "shadow", "entrance"];
   const cloneProfile = profile => {
     const copy = {...profile, offset: profile.offset.clone()};
     for (const key of colorKeys) copy[key] = profile[key].clone();
@@ -9324,7 +9420,31 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
   };
   const current = cloneProfile(original);
   let period = "original";
+  let weather = "clear";
+  let rainEffect;
   let transition = null;
+
+  function targetProfile() {
+    const preset = weatherPresets[weather];
+    if (!preset) return periods[period];
+    const profile = cloneProfile(periods[period]);
+    const nightSky = period === "night";
+    profile.zenith.set(nightSky ? preset.nightSky : preset.sky);
+    profile.horizon.set(nightSky ? preset.nightHorizon : preset.horizon);
+    profile.ambient.lerp(profile.horizon, .26);
+    profile.fog.lerp(profile.horizon, .58);
+    profile.fogNear *= preset.fog;
+    profile.fogFar *= preset.fog;
+    profile.direct *= preset.direct;
+    profile.fill *= preset.fill;
+    profile.reflection *= preset.reflection;
+    profile.shadow *= preset.shadow;
+    profile.skyOpacity = 1;
+    profile.starlight *= 1 - preset.cloud;
+    profile.cloudCover = preset.cloud;
+    profile.rain = preset.rain;
+    return profile;
+  }
 
   function apply(from, to, blend, updateShadow) {
     for (const key of colorKeys) current[key].copy(from[key]).lerp(to[key], blend);
@@ -9332,9 +9452,15 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
     current.offset.copy(from.offset).lerp(to.offset, blend);
     sky.visible = current.skyOpacity > 0;
     for (const key of ["zenith", "horizon", "glow"]) uniforms[key].value.copy(current[key]);
-    for (const key of ["skyOpacity", "dusk", "starlight"]) uniforms[key].value = current[key];
+    for (const key of ["skyOpacity", "dusk", "starlight", "cloudCover"]) uniforms[key].value = current[key];
     uniforms.sunDirection.value.copy(current.offset).normalize();
-    scene.fog?.color.copy(current.fog);
+    if (scene.fog) {
+      scene.fog.color.copy(current.fog);
+      scene.fog.near = current.fogNear;
+      scene.fog.far = current.fogFar;
+    }
+    if (current.rain > 0 && !rainEffect) rainEffect = createWeatherRain(scene, camera);
+    rainEffect?.setLevel(current.rain);
     scene.environmentIntensity = current.reflection;
     renderer.toneMappingExposure = current.exposure;
     entranceLighting?.apply(current.entrance);
@@ -9353,34 +9479,46 @@ function createDaylightController(scene, renderer, invalidate, entranceLighting)
     invalidate();
   }
 
+  function moveTo(animate, duration) {
+    const to = targetProfile();
+    if (animate) {
+      transition = {from: cloneProfile(current), to, start: performance.now(), shadowStep: -1, duration};
+    } else {
+      transition = null;
+      apply(to, to, 1, true);
+    }
+  }
+
   return {
     set(nextPeriod, animate) {
       if (!Object.hasOwn(periods, nextPeriod) || (animate && nextPeriod === period)) return;
       period = nextPeriod;
-      const to = periods[period];
-      if (animate) {
-        transition = {from: cloneProfile(current), to, start: performance.now(), shadowStep: -1};
-      } else {
-        transition = null;
-        apply(to, to, 1, true);
-      }
+      moveTo(animate, 2000);
+    },
+    setWeather(nextWeather, animate) {
+      if ((nextWeather !== "clear" && !Object.hasOwn(weatherPresets, nextWeather)) ||
+          (animate && nextWeather === weather)) return;
+      weather = nextWeather;
+      moveTo(animate, 940);
     },
     update(now) {
-      if (!transition) return;
-      const {from, to, start, shadowStep} = transition;
-      const progress = Math.max(0, Math.min(1, (now - start) / 2000));
-      const eased = progress * progress * (3 - 2 * progress);
-      // Rebuild static shadows at intervals while colors interpolate on every frame.
-      const step = Math.floor(progress * 10);
-      apply(from, to, eased, step !== shadowStep);
-      transition.shadowStep = step;
-      if (progress === 1) transition = null;
+      if (transition) {
+        const {from, to, start, shadowStep, duration} = transition;
+        const progress = Math.max(0, Math.min(1, (now - start) / duration));
+        const eased = progress * progress * (3 - 2 * progress);
+        const step = Math.floor(progress * 10);
+        apply(from, to, eased, step !== shadowStep);
+        transition.shadowStep = step;
+        if (progress === 1) transition = null;
+      }
+      if (rainEffect?.update(now)) invalidate();
     },
     dispose() {
       sky.removeFromParent();
       geometry.dispose();
       material.dispose();
       entranceLighting?.dispose();
+      rainEffect?.dispose();
     },
   };
 }
@@ -9485,15 +9623,22 @@ a.outputColorSpace=Ve;let r=A.camera??{},B=r.type==="OrthographicCamera"?new hn(
 const invalidate = () => { needsRender = true; };
 const updateEntranceBreeze = createEntranceBreeze(I, B, A.entranceBreeze);
 let daylight;
-const setTimeOfDay = (period, animate = true) => {
-  if (E || (!daylight && period === "original")) return;
+function getDaylight() {
   if (!daylight) {
-    daylight = createDaylightController(I, a, () => {
+    daylight = createDaylightController(I, B, a, () => {
       h.updateReflectionLighting();
       invalidate();
     }, createEntranceLighting(I, A.lighting?.entrance, A.series));
   }
-  daylight.set(period, animate);
+  return daylight;
+}
+const setTimeOfDay = (period, animate = true) => {
+  if (E || (!daylight && period === "original")) return;
+  getDaylight().set(period, animate);
+};
+const setWeather = (weather, animate = true) => {
+  if (E || (!daylight && weather === "clear")) return;
+  getDaylight().setWeather(weather, animate);
 };
 const previousView = new xt();
 let cameraMotion = null;
@@ -9647,5 +9792,5 @@ B.fov=r.portraitFov ? Math.min(102, Nn.radToDeg(2 * Math.atan(
     return;
   }
   Q = requestAnimationFrame(y);
-};return{ready:(n?Promise.resolve().then(()=>(rN(),aN)).then(({MoebiusPass:p,BloomPass:m})=>{if(E)return;let Y={scene:I,camera:{instance:B},renderer:{instance:a},sizes:D,_canvas:e,time:{}};try{M=n.type==="moebius"?new p(n.options,Y):new m(n.options,Y),M.composer.setSize(D.width,D.height)}catch(F){throw w.disconnect(),l.dispose(),h.dispose(),a.dispose(),F}}):Promise.resolve()).then(()=>(E||y(),h.ready)).catch(p=>{throw g(p)}),scene:I,camera:B,renderer:a,resize:d,setView,playCameraPath,pauseCameraPath,resumeCameraPath,stopCameraMotion,setTimeOfDay,dispose(){E||(E=!0,stopCameraMotion(),daylight?.dispose(),cancelAnimationFrame(Q),w.disconnect(),l.dispose(),h.dispose(),c.forEach(p=>{p.geometry.dispose(),(Array.isArray(p.material)?p.material:[p.material]).forEach(m=>m.dispose())}),M?.composer.dispose(),M?.depthRenderTarget?.dispose(),M?.normalRenderTarget?.dispose(),M?.normalMat?.dispose(),a.dispose(),I.clear())}}}return cN(mAA);})();
+};return{ready:(n?Promise.resolve().then(()=>(rN(),aN)).then(({MoebiusPass:p,BloomPass:m})=>{if(E)return;let Y={scene:I,camera:{instance:B},renderer:{instance:a},sizes:D,_canvas:e,time:{}};try{M=n.type==="moebius"?new p(n.options,Y):new m(n.options,Y),M.composer.setSize(D.width,D.height)}catch(F){throw w.disconnect(),l.dispose(),h.dispose(),a.dispose(),F}}):Promise.resolve()).then(()=>(E||y(),h.ready)).catch(p=>{throw g(p)}),scene:I,camera:B,renderer:a,resize:d,setView,playCameraPath,pauseCameraPath,resumeCameraPath,stopCameraMotion,setTimeOfDay,setWeather,dispose(){E||(E=!0,stopCameraMotion(),daylight?.dispose(),cancelAnimationFrame(Q),w.disconnect(),l.dispose(),h.dispose(),c.forEach(p=>{p.geometry.dispose(),(Array.isArray(p.material)?p.material:[p.material]).forEach(m=>m.dispose())}),M?.composer.dispose(),M?.depthRenderTarget?.dispose(),M?.normalRenderTarget?.dispose(),M?.normalMat?.dispose(),a.dispose(),I.clear())}}}return cN(mAA);})();
 globalThis.CreatorViewer = CreatorViewer;
