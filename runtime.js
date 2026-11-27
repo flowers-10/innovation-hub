@@ -9145,124 +9145,12 @@ function createEntranceBreeze(scene, camera, config) {
   };
 }
 
-function createWindowLighting(rules) {
-  const windowLevel = {value: 0};
-  const preparedMaterials = new WeakSet();
-
-  function hashRoom(x, y, z, seed) {
-    let hash = Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791) ^ seed;
-    hash = Math.imul(hash ^ (hash >>> 16), 0x45d9f3b);
-    return (hash ^ (hash >>> 16)) >>> 0;
-  }
-
-  function assignWindowMask(geometry, rule) {
-    const positions = geometry.getAttribute("position");
-    const indices = geometry.index;
-    const roots = new Uint32Array(positions.count);
-    const vertexKeys = new Map();
-    for (let index = 0; index < positions.count; index++) {
-      const key = `${Math.round(positions.getX(index) * 100000)}:${Math.round(positions.getY(index) * 100000)}:${Math.round(positions.getZ(index) * 100000)}`;
-      roots[index] = vertexKeys.get(key) ?? index;
-      if (roots[index] === index) vertexKeys.set(key, index);
-    }
-    function root(index) {
-      while (roots[index] !== index) {
-        roots[index] = roots[roots[index]];
-        index = roots[index];
-      }
-      return index;
-    }
-    for (let index = 0, count = indices?.count ?? positions.count; index + 2 < count; index += 3) {
-      const first = root(indices ? indices.getX(index) : index);
-      roots[root(indices ? indices.getX(index + 1) : index + 1)] = first;
-      roots[root(indices ? indices.getX(index + 2) : index + 2)] = first;
-    }
-    const panes = new Map();
-    for (let index = 0; index < positions.count; index++) {
-      const id = root(index);
-      const x = positions.getX(index), y = positions.getY(index), z = positions.getZ(index);
-      const pane = panes.get(id);
-      if (pane) {
-        pane.min.x = Math.min(pane.min.x, x);
-        pane.min.y = Math.min(pane.min.y, y);
-        pane.min.z = Math.min(pane.min.z, z);
-        pane.max.x = Math.max(pane.max.x, x);
-        pane.max.y = Math.max(pane.max.y, y);
-        pane.max.z = Math.max(pane.max.z, z);
-        pane.size++;
-      } else {
-        panes.set(id, {min: {x,y,z}, max: {x,y,z}, size: 1});
-      }
-    }
-    const occupied = new Map();
-    for (const [id, pane] of panes) {
-      const {min, max, size} = pane;
-      const height = max.y - min.y;
-      const y = (max.y + min.y) * .5;
-      if (size > 96 || height < rule.cell[1] * .1 || height > rule.cell[1] * 1.3 || y < (rule.minY ?? -Infinity)) continue;
-      const roomX = Math.floor((max.x + min.x) * .5 / rule.cell[0]);
-      const roomY = Math.floor(y / rule.cell[1]);
-      const roomZ = Math.floor((max.z + min.z) * .5 / rule.cell[2]);
-      const hash = hashRoom(roomX, roomY, roomZ, rule.seed);
-      if ((hash & 1023) / 1024 >= rule.density) continue;
-      occupied.set(id, {
-        strength: rule.strength * (.39 + ((hash >>> 10) & 255) / 420),
-        tone: ((hash >>> 20) & 255) / 255,
-        bottom: min.y,
-        height,
-      });
-    }
-    const mask = new Float32Array(positions.count * 3);
-    for (let index = 0; index < positions.count; index++) {
-      const room = occupied.get(root(index));
-      if (!room) continue;
-      mask[index * 3] = room.strength;
-      mask[index * 3 + 1] = room.tone;
-      mask[index * 3 + 2] = (positions.getY(index) - room.bottom) / room.height;
-    }
-    geometry.setAttribute("nightWindow", new mi(mask, 3));
-  }
-
-  function prepare(asset, item) {
-    const rule = rules?.[item.id];
-    if (!rule) return;
-    asset.traverse(mesh => {
-      const material = mesh.material;
-      if (!mesh.isMesh || !material?.isMeshStandardMaterial || !rule.materials.includes(material.name)) return;
-      if (!mesh.geometry.getAttribute("nightWindow")) assignWindowMask(mesh.geometry, rule);
-      if (preparedMaterials.has(material)) return;
-      preparedMaterials.add(material);
-      const compile = material.onBeforeCompile;
-      const baseKey = material.customProgramCacheKey();
-      material.customProgramCacheKey = () => baseKey + "|night-windows";
-      material.onBeforeCompile = function(shader, renderer) {
-        compile.call(this, shader, renderer);
-        shader.uniforms.windowLevel = windowLevel;
-        shader.vertexShader = shader.vertexShader
-          .replace("#include <common>", "#include <common>\nattribute vec3 nightWindow;\nvarying vec3 windowGlow;")
-          .replace("#include <begin_vertex>", "#include <begin_vertex>\nwindowGlow = nightWindow;");
-        shader.fragmentShader = shader.fragmentShader
-          .replace("#include <common>", "#include <common>\nuniform float windowLevel;\nvarying vec3 windowGlow;")
-          .replace("#include <emissivemap_fragment>", `
-            #include <emissivemap_fragment>
-            vec3 roomLight = mix(vec3(1.0, 0.57, 0.30), vec3(0.78, 0.86, 1.0), windowGlow.y * 0.57);
-            float ceilingWash = mix(0.43, 1.0, smoothstep(0.0, 0.93, windowGlow.z));
-            totalEmissiveRadiance += roomLight * (windowLevel * windowGlow.x * ceilingWash);
-          `);
-      };
-      material.needsUpdate = true;
-    });
-  }
-
-  return {prepare, setLevel(level) { windowLevel.value = level; }};
-}
-
-function createEntranceLighting(scene, lighting, series, name = "Campus entrance lighting") {
+function createEntranceLighting(scene, lighting, series) {
   const fixture = lighting && series?.find(item => item.id === lighting.seriesId);
   if (!fixture || !lighting.spots?.length) return;
   const group = new ns();
   km(group, fixture);
-  group.name = name;
+  group.name = "Campus entrance lighting";
   const lights = lighting.spots.map(spot => {
     const light = new eE(spot.color, 0, spot.range, spot.angle, spot.softness);
     light.position.fromArray(spot.position);
@@ -9270,14 +9158,12 @@ function createEntranceLighting(scene, lighting, series, name = "Campus entrance
     group.add(light, light.target);
     return light;
   });
-  const diffusers = new Map();
+  const diffusers = new Set();
   const fixtures = scene.children.find(object => object.userData.seriesId === fixture.id);
   fixtures?.traverse(object => {
     if (!object.isMesh) return;
     for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
-      if (material.name === lighting.diffuserMaterial && material.emissive) {
-        diffusers.set(material, material.emissiveIntensity);
-      }
+      if (material.name === lighting.diffuserMaterial && material.emissive) diffusers.add(material);
     }
   });
   scene.add(group);
@@ -9286,14 +9172,10 @@ function createEntranceLighting(scene, lighting, series, name = "Campus entrance
     apply(level) {
       group.visible = level > 0;
       lights.forEach((light, index) => { light.intensity = lighting.spots[index].intensity * level; });
-      for (const [material, intensity] of diffusers) {
-        if (lighting.diffuserBoost != null) {
-          material.emissiveIntensity = intensity + level * lighting.diffuserBoost;
-        } else {
-          if (level > 0) material.emissive.set(lighting.diffuserColor);
-          else material.emissive.setHex(0);
-          material.emissiveIntensity = level;
-        }
+      for (const material of diffusers) {
+        if (level > 0) material.emissive.set(lighting.diffuserColor);
+        else material.emissive.setHex(0);
+        material.emissiveIntensity = level;
       }
     },
     dispose() {
@@ -9642,7 +9524,6 @@ function createDaylightController(scene, camera, renderer, invalidate, entranceL
 }
 
 function EW({scene:e,camera:A,renderer:t,config:i,resolveAsset:s,onError:g,invalidate}){
-const windowLighting = createWindowLighting(i.lighting?.nightWindows);
 const reflectionTargets = [];
 const responsiveReflections = new Map();
 const reflectionLightReference = Math.max(0.01, i.environment?.intensity ?? 0.35);
@@ -9676,7 +9557,7 @@ lA.traverse(iA=>{if(!(iA instanceof Oe))return;iA.castShadow=z.castShadow!==!1,i
     return litMaterials.get(MA);
   }
   if (!z.glass && YA == null) return MA;
-  if(!z.glass){let EA=MA.clone();return EA.envMapIntensity=YA,F(EA),EA}let qA=new as;return Bn.prototype.copy.call(qA,MA),qA.metalness=z.glass.metalness??.9,qA.roughness=z.glass.roughness??.12,qA.envMapIntensity=z.glass.reflection??1,qA.clearcoat=1,qA.clearcoatRoughness=.08,$&&(qA.metalnessMap=$,qA.roughnessMap=$,qA.clearcoatMap=$),F(qA),qA};iA.material=Array.isArray(iA.material)?iA.material.map(WA):WA(iA.material)})},X=async(lA,z=!1)=>{let $=lA.item,iA=z?$.detailSrc:$.src,[YA,WA]=await Promise.all([R(iA),$.glass?.mask?T($.glass.mask):Promise.resolve(void 0)]);if(!W(lA))return;WA&&(WA.flipY=!1,WA.anisotropy=Math.min(8,t.capabilities.getMaxAnisotropy()));let MA=new ns,qA=YA.clone(!0);MA.add(qA);let EA=z?$.detailAssetMatrix??$.assetMatrix:$.assetMatrix;if(Array.isArray(EA)&&EA.length===16)MA.matrix.fromArray(EA),MA.matrixAutoUpdate=!1;else if($.fitSize!=null){MA.updateMatrixWorld(!0);let fA=new os().setFromObject(MA),GA=fA.getSize(new sA),VA=$.fitSize;if(typeof VA=="number")qA.scale.multiplyScalar(VA/(Math.max(GA.x,GA.y,GA.z)||1));else{let tt=VA.x??VA.width,Ct=VA.y??VA.height,FA=VA.z??VA.depth;tt!=null&&(qA.scale.x*=tt/(GA.x||1)),Ct!=null&&(qA.scale.y*=Ct/(GA.y||1)),FA!=null&&(qA.scale.z*=FA/(GA.z||1))}MA.updateMatrixWorld(!0),fA.setFromObject(MA);let OA=fA.getCenter(new sA);qA.position.sub(new sA(OA.x,fA.min.y,OA.z))}if(j(qA,$,WA),MA.name=z?"detail-asset":"base-asset",MA.visible=!z,lA.root.add(MA),lA.applySceneReflections?.(MA),windowLighting.prepare(MA,$),z)lA.detail=MA;else{lA.coarse=MA,lA.root.updateWorldMatrix(!0,!0);let fA=new os().setFromObject(MA).getCenter(new sA);lA.center.copy(lA.root.worldToLocal(fA))}},_=async lA=>{let z=lA.item,[$,iA,YA]=await Promise.all([z.texture?T(z.texture):Promise.resolve(null),z.surfaceDetail?.src?T(z.surfaceDetail.src):Promise.resolve(null),z.surfaceDetail?.mask?T(z.surfaceDetail.mask):Promise.resolve(null)]);if(!W(lA))return;$&&($.colorSpace=Ve,$.wrapS=$.wrapT=Kg,$.repeat.set(-1,-1),$.offset.set(1,1),$.anisotropy=t.capabilities.getMaxAnisotropy(),$.minFilter=Li,$.magFilter=ce,$.needsUpdate=!0);let WA=new PI(z.width??420,z.depth??460);WA.rotateX(-Math.PI/2);let MA=new Bn({map:$,color:z.color??"#ffffff",roughness:1,metalness:0,alphaTest:z.alphaTest??.65,side:rs});$&&iA&&CW(MA,$,iA,z.surfaceDetail,t,YA);let qA=new Oe(WA,MA);qA.receiveShadow=!0,o.add(WA),F(MA),lA.root.add(qA)},AA=async lA=>{let z=await R(lA.item.src);if(!W(lA))return;z.updateMatrixWorld(!0);let $=lA.item.instanceMatrices??[],iA=new xt;const tint=lA.item.tint?new bt(lA.item.tint):null;z.traverse(YA=>{if(!(YA instanceof Oe))return;let WA=new za(YA.geometry,YA.material,$.length);$.forEach((MA,qA)=>{iA.fromArray(MA).multiply(YA.matrixWorld),WA.setMatrixAt(qA,iA);let EA=lA.item.instanceColors?.[qA];if(EA!=null||tint){const color=new bt(EA??0xffffff);if(tint)color.multiply(tint);WA.setColorAt(qA,color)}}),l.add(WA),WA.instanceMatrix.needsUpdate=!0,WA.instanceColor&&(WA.instanceColor.needsUpdate=!0),WA.computeBoundingBox(),WA.computeBoundingSphere(),WA.castShadow=lA.item.castShadow!==!1,WA.receiveShadow=lA.item.receiveShadow!==!1,j(WA,lA.item),lA.root.add(WA)})},oA=lA=>{let{position:z,rotation:$,scale:iA,name:YA,show:WA,parentId:MA,...qA}=lA;return JSON.stringify(qA)},gA=lA=>{if(n)return;let z=new Set;lA.filter($=>gV.has($.type)).forEach($=>{let iA=String($.id);z.add(iA);let YA=I.get(iA),WA=oA($);if(YA&&YA.signature!==WA&&(YA.cancelled=!0,YA.root.removeFromParent(),I.delete(iA),YA=void 0),!YA){let MA=new ns;MA.userData={id:$.id,seriesId:$.id,designRoot:!0},YA={root:MA,item:$,signature:WA,cancelled:!1,showingDetail:!1,center:new sA},I.set(iA,YA),e.add(MA);let qA=($.type==="model"?X(YA):$.type==="ground"?_(YA):AA(YA)).catch(EA=>m(EA,$.src??$.texture));h.push(qA)}YA.item=$,km(YA.root,$)}),I.forEach(($,iA)=>{z.has(iA)||($.cancelled=!0,$.root.removeFromParent(),I.delete(iA))})},hA=()=>{n||(A.getWorldPosition(u),I.forEach(lA=>{if(!lA.item.detailSrc||!lA.coarse||!nV(lA.root))return;lA.root.updateWorldMatrix(!0,!1),p.copy(lA.center).applyMatrix4(lA.root.matrixWorld);let z=u.distanceTo(p),$=lA.item.detailMode??i.detailMode??"auto",iA=$==="detail"||$==="auto"&&z<(lA.showingDetail?lA.item.lod?.exit??185:lA.item.lod?.enter??155);!lA.detail&&!lA.detailPromise&&!lA.detailFailed&&($==="detail"||$==="auto"&&z<(lA.item.lod?.prefetch??225))&&(lA.detailPromise=X(lA,!0).catch(YA=>{lA.detailFailed=!0,m(YA,lA.item.detailSrc)}).finally(()=>{lA.detailPromise=void 0,W(lA)&&(hA(),invalidate())})),lA.showingDetail=iA&&!!lA.detail,lA.coarse.visible=!lA.showingDetail,lA.detail&&(lA.detail.visible=lA.showingDetail)}))};if(t.toneMapping=IE,t.toneMappingExposure=i.renderer?.exposure??1.1,(i.series??[]).some(lA=>lA.type==="model"||lA.type==="instances")&&i.lighting==null&&i.environment==null&&i.light==null){let lA=new qB("#e8f5ff","#738167",1.15);B.push(lA),e.add(lA)}if(i.lighting?.hemisphere){let lA=i.lighting.hemisphere,z=new qB(lA.sky??"#e8f5ff",lA.ground??"#738167",lA.intensity??1.15);B.push(z),e.add(z)}
+  if(!z.glass){let EA=MA.clone();return EA.envMapIntensity=YA,F(EA),EA}let qA=new as;return Bn.prototype.copy.call(qA,MA),qA.metalness=z.glass.metalness??.9,qA.roughness=z.glass.roughness??.12,qA.envMapIntensity=z.glass.reflection??1,qA.clearcoat=1,qA.clearcoatRoughness=.08,$&&(qA.metalnessMap=$,qA.roughnessMap=$,qA.clearcoatMap=$),F(qA),qA};iA.material=Array.isArray(iA.material)?iA.material.map(WA):WA(iA.material)})},X=async(lA,z=!1)=>{let $=lA.item,iA=z?$.detailSrc:$.src,[YA,WA]=await Promise.all([R(iA),$.glass?.mask?T($.glass.mask):Promise.resolve(void 0)]);if(!W(lA))return;WA&&(WA.flipY=!1,WA.anisotropy=Math.min(8,t.capabilities.getMaxAnisotropy()));let MA=new ns,qA=YA.clone(!0);MA.add(qA);let EA=z?$.detailAssetMatrix??$.assetMatrix:$.assetMatrix;if(Array.isArray(EA)&&EA.length===16)MA.matrix.fromArray(EA),MA.matrixAutoUpdate=!1;else if($.fitSize!=null){MA.updateMatrixWorld(!0);let fA=new os().setFromObject(MA),GA=fA.getSize(new sA),VA=$.fitSize;if(typeof VA=="number")qA.scale.multiplyScalar(VA/(Math.max(GA.x,GA.y,GA.z)||1));else{let tt=VA.x??VA.width,Ct=VA.y??VA.height,FA=VA.z??VA.depth;tt!=null&&(qA.scale.x*=tt/(GA.x||1)),Ct!=null&&(qA.scale.y*=Ct/(GA.y||1)),FA!=null&&(qA.scale.z*=FA/(GA.z||1))}MA.updateMatrixWorld(!0),fA.setFromObject(MA);let OA=fA.getCenter(new sA);qA.position.sub(new sA(OA.x,fA.min.y,OA.z))}if(j(qA,$,WA),MA.name=z?"detail-asset":"base-asset",MA.visible=!z,lA.root.add(MA),lA.applySceneReflections?.(MA),z)lA.detail=MA;else{lA.coarse=MA,lA.root.updateWorldMatrix(!0,!0);let fA=new os().setFromObject(MA).getCenter(new sA);lA.center.copy(lA.root.worldToLocal(fA))}},_=async lA=>{let z=lA.item,[$,iA,YA]=await Promise.all([z.texture?T(z.texture):Promise.resolve(null),z.surfaceDetail?.src?T(z.surfaceDetail.src):Promise.resolve(null),z.surfaceDetail?.mask?T(z.surfaceDetail.mask):Promise.resolve(null)]);if(!W(lA))return;$&&($.colorSpace=Ve,$.wrapS=$.wrapT=Kg,$.repeat.set(-1,-1),$.offset.set(1,1),$.anisotropy=t.capabilities.getMaxAnisotropy(),$.minFilter=Li,$.magFilter=ce,$.needsUpdate=!0);let WA=new PI(z.width??420,z.depth??460);WA.rotateX(-Math.PI/2);let MA=new Bn({map:$,color:z.color??"#ffffff",roughness:1,metalness:0,alphaTest:z.alphaTest??.65,side:rs});$&&iA&&CW(MA,$,iA,z.surfaceDetail,t,YA);let qA=new Oe(WA,MA);qA.receiveShadow=!0,o.add(WA),F(MA),lA.root.add(qA)},AA=async lA=>{let z=await R(lA.item.src);if(!W(lA))return;z.updateMatrixWorld(!0);let $=lA.item.instanceMatrices??[],iA=new xt;const tint=lA.item.tint?new bt(lA.item.tint):null;z.traverse(YA=>{if(!(YA instanceof Oe))return;let WA=new za(YA.geometry,YA.material,$.length);$.forEach((MA,qA)=>{iA.fromArray(MA).multiply(YA.matrixWorld),WA.setMatrixAt(qA,iA);let EA=lA.item.instanceColors?.[qA];if(EA!=null||tint){const color=new bt(EA??0xffffff);if(tint)color.multiply(tint);WA.setColorAt(qA,color)}}),l.add(WA),WA.instanceMatrix.needsUpdate=!0,WA.instanceColor&&(WA.instanceColor.needsUpdate=!0),WA.computeBoundingBox(),WA.computeBoundingSphere(),WA.castShadow=lA.item.castShadow!==!1,WA.receiveShadow=lA.item.receiveShadow!==!1,j(WA,lA.item),lA.root.add(WA)})},oA=lA=>{let{position:z,rotation:$,scale:iA,name:YA,show:WA,parentId:MA,...qA}=lA;return JSON.stringify(qA)},gA=lA=>{if(n)return;let z=new Set;lA.filter($=>gV.has($.type)).forEach($=>{let iA=String($.id);z.add(iA);let YA=I.get(iA),WA=oA($);if(YA&&YA.signature!==WA&&(YA.cancelled=!0,YA.root.removeFromParent(),I.delete(iA),YA=void 0),!YA){let MA=new ns;MA.userData={id:$.id,seriesId:$.id,designRoot:!0},YA={root:MA,item:$,signature:WA,cancelled:!1,showingDetail:!1,center:new sA},I.set(iA,YA),e.add(MA);let qA=($.type==="model"?X(YA):$.type==="ground"?_(YA):AA(YA)).catch(EA=>m(EA,$.src??$.texture));h.push(qA)}YA.item=$,km(YA.root,$)}),I.forEach(($,iA)=>{z.has(iA)||($.cancelled=!0,$.root.removeFromParent(),I.delete(iA))})},hA=()=>{n||(A.getWorldPosition(u),I.forEach(lA=>{if(!lA.item.detailSrc||!lA.coarse||!nV(lA.root))return;lA.root.updateWorldMatrix(!0,!1),p.copy(lA.center).applyMatrix4(lA.root.matrixWorld);let z=u.distanceTo(p),$=lA.item.detailMode??i.detailMode??"auto",iA=$==="detail"||$==="auto"&&z<(lA.showingDetail?lA.item.lod?.exit??185:lA.item.lod?.enter??155);!lA.detail&&!lA.detailPromise&&!lA.detailFailed&&($==="detail"||$==="auto"&&z<(lA.item.lod?.prefetch??225))&&(lA.detailPromise=X(lA,!0).catch(YA=>{lA.detailFailed=!0,m(YA,lA.item.detailSrc)}).finally(()=>{lA.detailPromise=void 0,W(lA)&&(hA(),invalidate())})),lA.showingDetail=iA&&!!lA.detail,lA.coarse.visible=!lA.showingDetail,lA.detail&&(lA.detail.visible=lA.showingDetail)}))};if(t.toneMapping=IE,t.toneMappingExposure=i.renderer?.exposure??1.1,(i.series??[]).some(lA=>lA.type==="model"||lA.type==="instances")&&i.lighting==null&&i.environment==null&&i.light==null){let lA=new qB("#e8f5ff","#738167",1.15);B.push(lA),e.add(lA)}if(i.lighting?.hemisphere){let lA=i.lighting.hemisphere,z=new qB(lA.sky??"#e8f5ff",lA.ground??"#738167",lA.intensity??1.15);B.push(z),e.add(z)}
 if (i.lighting?.sun) {
   const sun = i.lighting.sun;
   const light = new Fo(sun.color ?? "#fff4dc", sun.intensity ?? 1.6);
@@ -9713,7 +9594,6 @@ e.environmentRotation.copy(e.backgroundRotation),YA!==$&&$.dispose()}else $.disp
       if (coarse && item.sceneReflection && nV(root)) {
         entry.applySceneReflections = yield* captureSceneReflections(
           e, t, root, item.sceneReflection, reflectionTargets, a, trackReflectionLighting);
-        windowLighting.prepare(root, item);
       }
     }
   };
@@ -9737,7 +9617,7 @@ e.environmentRotation.copy(e.backgroundRotation),YA!==$&&$.dispose()}else $.disp
       reflectionFrame = requestAnimationFrame(captureNext);
     });
   }
-}),sync:gA,update:hA,updateReflectionLighting,setWindowLevel:windowLighting.setLevel,dispose(){n||(n=!0,I.forEach(lA=>{lA.cancelled=!0,lA.root.removeFromParent()}),I.clear(),B.forEach(lA=>{lA.removeFromParent(),lA instanceof Fo&&lA.target.removeFromParent(),lA.dispose()}),e.environment===d&&d&&(e.environment=E),e.background===w&&w&&(e.background=M),e.environmentIntensity=D,y?.dispose(),cancelAnimationFrame(reflectionFrame),reflectionCapture?.return(),reflectionTargets.forEach(target=>target.dispose()),reflectionTargets.length=0,responsiveReflections.clear(),l.forEach(lA=>lA.dispose()),l.clear(),Y(),c.clear(),Q.clear())}}}function BN(e){if(!e?.effectsEnabled)return null;let A=e.activeEffect??"moebius",t=e.effectIntensity??1;if(!Number.isFinite(t)||t<0)throw new Error("\u540E\u671F\u6548\u679C\u5F3A\u5EA6\u5FC5\u987B\u4E3A\u6709\u9650\u7684\u975E\u8D1F\u6570\u3002");if(A==="bloom")return{type:A,options:{intensity:t}};if(A==="moebius")return{type:A,options:{thickness:1.5*t,amplitude:2*t}};throw new Error(`\u4E0D\u652F\u6301\u7684\u540E\u671F\u6548\u679C\uFF1A${A}\u3002\u5F53\u524D\u53EF\u5BFC\u51FA moebius\u3001bloom\u3002`)}var Ob=new Set(["rectangle","ellipse","triangle","polygon","star"]);function yAA(e,A,t){if(e==="rectangle")return new PI(A,t);if(e==="ellipse"){let g=new UC(.5,64);return g.scale(A,t,1),g}let i=new vB,s=e==="triangle"?3:e==="polygon"?5:10;for(let g=0;g<s;g++){let n=Math.PI/2+g*Math.PI*2/s,I=e==="star"&&g%2?.23:.5,o=Math.cos(n)*I*A,a=Math.sin(n)*I*t;g===0?i.moveTo(o,a):i.lineTo(o,a)}return i.closePath(),new LC(i)}function fAA({canvas:e,config:A,resolveAsset:t=g=>g,onError:i,editor:s,onNavigate}){let g=p=>{let m=p instanceof Error?p:new Error(String(p));return i?i(m):console.error(m),m},n;try{n=BN(s)}catch(p){throw g(p)}let I=new SC,o=A.renderer??{},a=new V0({canvas:e,antialias:o.antialias!==!1,alpha:o.alpha??!1});a.setClearColor(o.clearColor??"#ffffff",o.clearAlpha??1),a.setPixelRatio(Math.min(devicePixelRatio || 1, o.maxPixelRatio ?? 2));
+}),sync:gA,update:hA,updateReflectionLighting,dispose(){n||(n=!0,I.forEach(lA=>{lA.cancelled=!0,lA.root.removeFromParent()}),I.clear(),B.forEach(lA=>{lA.removeFromParent(),lA instanceof Fo&&lA.target.removeFromParent(),lA.dispose()}),e.environment===d&&d&&(e.environment=E),e.background===w&&w&&(e.background=M),e.environmentIntensity=D,y?.dispose(),cancelAnimationFrame(reflectionFrame),reflectionCapture?.return(),reflectionTargets.forEach(target=>target.dispose()),reflectionTargets.length=0,responsiveReflections.clear(),l.forEach(lA=>lA.dispose()),l.clear(),Y(),c.clear(),Q.clear())}}}function BN(e){if(!e?.effectsEnabled)return null;let A=e.activeEffect??"moebius",t=e.effectIntensity??1;if(!Number.isFinite(t)||t<0)throw new Error("\u540E\u671F\u6548\u679C\u5F3A\u5EA6\u5FC5\u987B\u4E3A\u6709\u9650\u7684\u975E\u8D1F\u6570\u3002");if(A==="bloom")return{type:A,options:{intensity:t}};if(A==="moebius")return{type:A,options:{thickness:1.5*t,amplitude:2*t}};throw new Error(`\u4E0D\u652F\u6301\u7684\u540E\u671F\u6548\u679C\uFF1A${A}\u3002\u5F53\u524D\u53EF\u5BFC\u51FA moebius\u3001bloom\u3002`)}var Ob=new Set(["rectangle","ellipse","triangle","polygon","star"]);function yAA(e,A,t){if(e==="rectangle")return new PI(A,t);if(e==="ellipse"){let g=new UC(.5,64);return g.scale(A,t,1),g}let i=new vB,s=e==="triangle"?3:e==="polygon"?5:10;for(let g=0;g<s;g++){let n=Math.PI/2+g*Math.PI*2/s,I=e==="star"&&g%2?.23:.5,o=Math.cos(n)*I*A,a=Math.sin(n)*I*t;g===0?i.moveTo(o,a):i.lineTo(o,a)}return i.closePath(),new LC(i)}function fAA({canvas:e,config:A,resolveAsset:t=g=>g,onError:i,editor:s,onNavigate}){let g=p=>{let m=p instanceof Error?p:new Error(String(p));return i?i(m):console.error(m),m},n;try{n=BN(s)}catch(p){throw g(p)}let I=new SC,o=A.renderer??{},a=new V0({canvas:e,antialias:o.antialias!==!1,alpha:o.alpha??!1});a.setClearColor(o.clearColor??"#ffffff",o.clearAlpha??1),a.setPixelRatio(Math.min(devicePixelRatio || 1, o.maxPixelRatio ?? 2));
 a.transmissionResolutionScale = o.transmissionResolutionScale ?? 1;
 a.outputColorSpace=Ve;let r=A.camera??{},B=r.type==="OrthographicCamera"?new hn(-10,10,10,-10,r.near??.1,r.far??2e3):new Bi(r.fov??45,1,r.near??.1,r.far??2e3);B.position.set(r.position?.x??0,r.position?.y??10,r.position?.z??20);let l=new v0(B,e);l.target.set(r.target?.x??0,r.target?.y??0,r.target?.z??0),l.enableDamping=r.controls?.enableDamping??!0,l.dampingFactor=r.controls?.dampingFactor??l.dampingFactor,l.enablePan=r.controls?.enablePan??!0;for(let p of["minDistance","maxDistance","minPolarAngle","maxPolarAngle","minAzimuthAngle","maxAzimuthAngle"])typeof r.controls?.[p]=="number"&&(l[p]=r.controls[p]);l.update(),A.fog?.show&&(I.fog=new YC(A.fog.color??"#ffffff",A.fog.near??1,A.fog.far??1500));let needsRender = true;
 const invalidate = () => { needsRender = true; };
@@ -9745,22 +9625,10 @@ const updateEntranceBreeze = createEntranceBreeze(I, B, A.entranceBreeze);
 let daylight;
 function getDaylight() {
   if (!daylight) {
-    const entrance = createEntranceLighting(I, A.lighting?.entrance, A.series);
-    const lobby = createEntranceLighting(I, A.lighting?.lobby, A.series, "Campus lobby lighting");
     daylight = createDaylightController(I, B, a, () => {
       h.updateReflectionLighting();
       invalidate();
-    }, {
-      apply(level) {
-        entrance?.apply(level);
-        lobby?.apply(level);
-        h.setWindowLevel(level);
-      },
-      dispose() {
-        entrance?.dispose();
-        lobby?.dispose();
-      },
-    });
+    }, createEntranceLighting(I, A.lighting?.entrance, A.series));
   }
   return daylight;
 }

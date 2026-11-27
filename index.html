@@ -292,7 +292,7 @@
         fetch(new URL('./project.json', document.baseURI), {cache: 'no-cache'}).catch(error => {
           throw new Error('无法读取 project.json，请确认本地预览服务正在运行。', {cause: error});
         }),
-        import('./runtime.js?v=night-glow-1').catch(error => {
+        import('./runtime.js?v=weather-t9').catch(error => {
           throw new Error('无法加载三维运行时 runtime.js。', {cause: error});
         }),
       ]);
