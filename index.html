@@ -278,7 +278,7 @@
         fetch(new URL('./project.json', document.baseURI), {cache: 'no-cache'}).catch(error => {
           throw new Error('无法读取 project.json，请确认本地预览服务正在运行。', {cause: error});
         }),
-        import('./runtime.js?v=patrol-t8-1').catch(error => {
+        import('./runtime.js?v=breeze-t9').catch(error => {
           throw new Error('无法加载三维运行时 runtime.js。', {cause: error});
         }),
       ]);
@@ -324,7 +324,7 @@
 
       const viewer = CreatorViewer.mount({
         canvas,
-        config,
+        config: query.get('wind') === 'off' ? {...config, entranceBreeze: undefined} : config,
         editor,
         resolveAsset: path => new URL(path, document.baseURI).href,
         onError: showError,

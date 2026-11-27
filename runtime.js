@@ -9081,6 +9081,70 @@ function* captureSceneReflections(scene, renderer, root, options, targets, mater
   return applyTo;
 }
 
+function createEntranceBreeze(scene, camera, config) {
+  if (!config?.seriesId || !config.meshName || !(config.range > 0)) return;
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const cameraLocal = new sA();
+  let mesh, position, rest, bounds, sine, cosine;
+  let lastUpdate = null;
+
+  function prepare() {
+    const group = scene.children.find(object => object.userData.seriesId === config.seriesId);
+    const foliage = group?.getObjectByName(config.meshName);
+    const geometry = foliage?.geometry;
+    const attribute = geometry?.getAttribute("position");
+    if (!attribute || attribute.itemSize !== 3 || attribute.isInterleavedBufferAttribute) return false;
+
+    mesh = foliage;
+    position = attribute;
+    rest = position.array.slice();
+    geometry.computeBoundingBox();
+    bounds = geometry.boundingBox;
+    geometry.computeBoundingSphere();
+    geometry.boundingSphere.radius += .06;
+
+    sine = new Float32Array(position.count);
+    cosine = new Float32Array(position.count);
+    const height = Math.max(.001, bounds.max.y - bounds.min.y);
+    for (let index = 0, offset = 0; index < position.count; index++, offset += 3) {
+      const relativeHeight = (rest[offset + 1] - bounds.min.y) / height;
+      const bend = relativeHeight * relativeHeight;
+      const phase = rest[offset] * .69 + rest[offset + 2] * 2.4;
+      sine[index] = Math.sin(phase) * bend;
+      cosine[index] = Math.cos(phase) * bend;
+    }
+    return true;
+  }
+
+  return now => {
+    if (document.hidden) return false;
+    const nearby = !reducedMotion.matches &&
+      (mesh || prepare()) &&
+      bounds.distanceToPoint(mesh.worldToLocal(cameraLocal.copy(camera.position))) < config.range;
+    if (!nearby) {
+      if (lastUpdate === null) return false;
+      position.array.set(rest);
+      position.needsUpdate = true;
+      lastUpdate = null;
+      return true;
+    }
+    if (lastUpdate !== null && now - lastUpdate < 1000 / 16) return false;
+
+    const seconds = now / 1000;
+    const gust = .69 + .22 * Math.sin(seconds * 1.07);
+    const along = Math.sin(seconds * 4) * gust;
+    const across = Math.cos(seconds * 4) * gust;
+    const coordinates = position.array;
+    for (let index = 0, offset = 0; index < position.count; index++, offset += 3) {
+      coordinates[offset] = rest[offset] + .05 * (along * cosine[index] + across * sine[index]);
+      coordinates[offset + 2] = rest[offset + 2] + .026 * (across * cosine[index] - along * sine[index]);
+    }
+    position.needsUpdate = true;
+    lastUpdate = now;
+    return true;
+  };
+}
+
 function createEntranceLighting(scene, lighting, series) {
   const fixture = lighting && series?.find(item => item.id === lighting.seriesId);
   if (!fixture || !lighting.spots?.length) return;
@@ -9419,6 +9483,7 @@ e.environmentRotation.copy(e.backgroundRotation),YA!==$&&$.dispose()}else $.disp
 a.transmissionResolutionScale = o.transmissionResolutionScale ?? 1;
 a.outputColorSpace=Ve;let r=A.camera??{},B=r.type==="OrthographicCamera"?new hn(-10,10,10,-10,r.near??.1,r.far??2e3):new Bi(r.fov??45,1,r.near??.1,r.far??2e3);B.position.set(r.position?.x??0,r.position?.y??10,r.position?.z??20);let l=new v0(B,e);l.target.set(r.target?.x??0,r.target?.y??0,r.target?.z??0),l.enableDamping=r.controls?.enableDamping??!0,l.dampingFactor=r.controls?.dampingFactor??l.dampingFactor,l.enablePan=r.controls?.enablePan??!0;for(let p of["minDistance","maxDistance","minPolarAngle","maxPolarAngle","minAzimuthAngle","maxAzimuthAngle"])typeof r.controls?.[p]=="number"&&(l[p]=r.controls[p]);l.update(),A.fog?.show&&(I.fog=new YC(A.fog.color??"#ffffff",A.fog.near??1,A.fog.far??1500));let needsRender = true;
 const invalidate = () => { needsRender = true; };
+const updateEntranceBreeze = createEntranceBreeze(I, B, A.entranceBreeze);
 let daylight;
 const setTimeOfDay = (period, animate = true) => {
   if (E || (!daylight && period === "original")) return;
@@ -9566,6 +9631,7 @@ B.fov=r.portraitFov ? Math.min(102, Nn.radToDeg(2 * Math.atan(
     }
     l.update();
     B.updateMatrixWorld();
+    if (updateEntranceBreeze?.(now)) invalidate();
     const cameraMoved = B.matrixWorld.elements.some((value, index) =>
       Math.abs(value - previousView.elements[index]) > (index >= 12 ? 0.002 : 0.00001)
     );
